@@ -9,4 +9,4 @@ ffmpeg
 ffprobe
 asyncio
 humanize
-pip install yt-dlp
+yt-dlp
