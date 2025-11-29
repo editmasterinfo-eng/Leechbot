@@ -1,14 +1,13 @@
 import os
 import time
 import asyncio
-import re
-import requests # Still good to have for future generic file handling, though not actively used for PDFs with yt-dlp here
+import math
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message
 from config import api_id, api_hash, bot_token, auth_users, sudo_users
 from yt_dlp import YoutubeDL
 
-# Initialize the bot client
+# --- Bot Initialization ---
 bot = Client(
     "video_downloader_bot",
     api_id=api_id,
@@ -16,307 +15,190 @@ bot = Client(
     bot_token=bot_token
 )
 
-# Dictionary to store users in bulk mode
-bulk_mode_users = {}
-
-# --- Helper Functions for Progress Bar ---
-async def progress_for_pyrogram(current, total, ud_type, message, start_time):
-    """
-    Shows progress for Pyrogram upload/download.
-    """
-    now = time.time()
-    diff = now - start_time
-    if round(diff % 10.00) == 0 or current == total:
-        if diff < 1:
-            diff = 1
-        
-        percentage = current * 100 / total
-        
-        speed = current / diff
-        speed_string = f"{humanbytes(speed)}/s"
-        
-        try:
-            eta = int((total - current) / speed)
-            eta_string = f"{str(datetime.timedelta(seconds=eta))} left"
-        except ZeroDivisionError:
-            eta_string = "Calculating..." # or "N/A"
-        
-        bar_length = 10
-        filled_length = int(bar_length * current // total)
-        bar = '█' * filled_length + '░' * (bar_length - filled_length)
-        
-        progress_text = (
-            f"**{ud_type}**\n"
-            f"**Progress:** `{bar}` {percentage:.2f}%\n"
-            f"**Size:** {humanbytes(current)} / {humanbytes(total)}\n"
-            f"**Speed:** {speed_string}\n"
-            f"**ETA:** {eta_string}"
-        )
-        
-        try:
-            await message.edit_text(progress_text)
-        except Exception:
-            pass
+# --- Helper Functions ---
 
 def humanbytes(size):
-    """
-    Converts bytes to human-readable format.
-    """
+    """Human readable file size"""
     if not size:
         return ""
     power = 2**10
     n = 0
-    dic_powerN = {0: ' ', 1: 'K', 2: 'M', 3: 'G', 4: 'T'}
+    Dic_powerN = {0: ' ', 1: 'K', 2: 'M', 3: 'G', 4: 'T'}
     while size > power:
         size /= power
         n += 1
-    return str(round(size, 2)) + " " + dic_powerN[n] + 'B'
+    return str(round(size, 2)) + " " + Dic_powerN[n] + 'B'
 
-import datetime
-
-# yt-dlp's progress hook function (for download)
-async def download_progress_hook(d, message, start_time, ud_type="Downloading"):
-    if d['status'] == 'downloading':
-        total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate')
-        downloaded_bytes = d.get('downloaded_bytes', 0)
+async def progress_for_pyrogram(current, total, ud_type, message, start_time):
+    """Advanced progress bar function"""
+    now = time.time()
+    diff = now - start_time
+    if round(diff % 5.00) == 0 or current == total:
+        percentage = current * 100 / total
+        speed = current / diff
+        elapsed_time = round(diff)
+        eta = round((total - current) / speed) if speed > 0 else 0
         
-        if total_bytes:
-            await progress_for_pyrogram(downloaded_bytes, total_bytes, ud_type, message, start_time)
-    elif d['status'] == 'finished':
-        await message.edit_text(f"✅ **Download Complete!**\n\n**Ab Upload Ho Raha Hai...**")
+        # Progress bar visuals
+        progress_bar = "[{0}{1}]".format(
+            ''.join(["█" for i in range(math.floor(percentage / 10))]),
+            ''.join(["░" for i in range(10 - math.floor(percentage / 10))])
+        )
 
-# Regex to find URLs in text
-URL_REGEX = r"(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^\s()<>]+|\(([^\s()<>]+|(\([^\s()<>]+\)))*\))+(?:\(([^\s()<>]+|(\([^\s()<>]+\)))*\)|[^\s`!()\[\]{};:'\".,<>?«»“”‘’]))"
+        # Text format
+        progress_text = (
+            f"**{ud_type}**\n"
+            f"{progress_bar} {round(percentage, 2)}%\n"
+            f"➢ **Size:** {humanbytes(current)} / {humanbytes(total)}\n"
+            f"➢ **Speed:** {humanbytes(speed)}/s\n"
+            f"➢ **ETA:** {time.strftime('%H:%M:%S', time.gmtime(eta))}"
+        )
+        
+        try:
+            await message.edit_text(text=progress_text)
+        except Exception:
+            pass
 
-# --- Main Download Logic (Refactored for better reusability) ---
-async def process_single_link(bot_client: Client, original_message: Message, url: str):
-    
-    msg = await original_message.reply_text(f"🔎 **Link Process Ho Raha Hai:** `{url}`\n**Jankari Nikali Jaa Rahi Hai...**", quote=True)
+# --- Core Video Processing Function ---
 
-    out_filename = None # Initialize to None for cleanup
+async def process_link(bot: Client, m: Message, url: str):
+    """
+    This function handles the entire process for a single link:
+    - Extracts info
+    - Downloads video
+    - Uploads video
+    - Cleans up
+    """
+    msg = await m.reply_text("🔎 **Processing Link & Extracting Info...**", quote=True)
 
     try:
-        # 2. Extract Info using yt-dlp
-        ydl_opts = {
-            'format': 'best',
-            'quiet': True,
-            'no_warnings': True,
-            'skip_download': True, # Only extract info first
-        }
-
+        # 1. Extract Info using yt-dlp
+        ydl_opts = {'format': 'best', 'quiet': True, 'no_warnings': True}
         with YoutubeDL(ydl_opts) as ydl:
             try:
                 info_dict = ydl.extract_info(url, download=False)
-                original_title = info_dict.get('title', 'Video')
-                # Title modification logic
+                original_title = info_dict.get('title', 'Video').strip()
                 final_title = f"{original_title} @skillneast"
-                
-                # Get preferred extension
-                ext = info_dict.get('ext', 'mp4')
-                if not ext: ext = 'mp4' # Fallback
-                
             except Exception as e:
-                await msg.edit_text(f"❌ **Link Ki Jankari Nikalne Mein Erro Ho Gaya Ya Ye Video Nahi Hai:** {e}")
+                await msg.edit_text(f"❌ Error getting link info: `{e}`")
                 return
 
-        # 3. Download Video
-        await msg.edit_text(f"⬇️ **Download Ho Raha Hai:** `{final_title}.{ext}`\n\n**Kripya Intezaar Kare...**")
+        # 2. Download Video
+        await msg.edit_text(f"⬇️ **Downloading:** `{final_title}`\n\nPlease wait...")
         
-        # Output filename template
-        temp_filename_base = f"download_{original_message.from_user.id}_{int(time.time())}"
-        
+        out_filename = f"{final_title}.mp4"
         download_opts = {
-            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best', # Prioritize mp4, then best
-            'outtmpl': f"{temp_filename_base}.%(ext)s", # Save with temporary base name and original extension
+            'format': 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best',
+            'outtmpl': out_filename,
             'quiet': True,
             'noplaylist': True,
-            'progress_hooks': [lambda d: asyncio.ensure_future(
-                download_progress_hook(d, msg, start_time=time.time(), ud_type="Downloading")
-            )],
         }
 
-        download_start_time = time.time()
         with YoutubeDL(download_opts) as ydl:
             ydl.download([url])
 
-        # Find the actual downloaded file
-        found = False
-        for file in os.listdir('.'):
-            if file.startswith(temp_filename_base):
-                out_filename = file
-                found = True
-                break
-        
-        if not found:
-            await msg.edit_text("❌ **Download Ho Nahi Paaya. File Nahi Mili.**")
-            return
-        
-        # Rename the file to the final title + @skillneast
-        final_file_extension = os.path.splitext(out_filename)[1]
-        new_final_filename = f"{final_title}{final_file_extension}"
-        os.rename(out_filename, new_final_filename)
-        out_filename = new_final_filename # Update out_filename to the new name
+        if not os.path.exists(out_filename):
+            # Try to find file with different extension if yt-dlp changed it
+            found = False
+            for file in os.listdir('.'):
+                if file.startswith(original_title): # Check with original title
+                    out_filename = file
+                    found = True
+                    break
+            if not found:
+                await msg.edit_text("❌ Download Failed. File not found after download.")
+                return
 
-        # 4. Upload Video
-        await msg.edit_text("⬆️ **Telegram Par Upload Ho Raha Hai...**")
-        
-        upload_start_time = time.time()
-        
-        # Check file size for upload type
-        file_size = os.path.getsize(out_filename)
-        if file_size > 2000 * 1024 * 1024: # 2 GB limit approx
-            await msg.edit_text(f"❌ **File size {humanbytes(file_size)} bada hai. Telegram ki {humanbytes(2000 * 1024 * 1024)} limit se zyada.**")
-            return
+        # 3. Upload Video
+        start_time = time.time()
+        await m.reply_video(
+            video=out_filename,
+            caption=f"**{final_title}**\n\nDownloaded by: {m.from_user.mention}",
+            supports_streaming=True,
+            progress=progress_for_pyrogram,
+            progress_args=("⬆️ Uploading...", msg, start_time)
+        )
 
-        # Determine if it's a video or document based on extension
-        if final_file_extension.lower() in ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv']: # Added .flv
-            await original_message.reply_video(
-                video=out_filename,
-                caption=f"**{final_title}**\n\nDownloaded by: {original_message.from_user.mention}",
-                supports_streaming=True,
-                progress=progress_for_pyrogram,
-                progress_args=("Uploading", msg, upload_start_time)
-            )
-        else:
-            await original_message.reply_document(
-                document=out_filename,
-                caption=f"**{final_title}**\n\nDownloaded by: {original_message.from_user.mention}",
-                progress=progress_for_pyrogram,
-                progress_args=("Uploading", msg, upload_start_time)
-            )
-
-        # 5. Cleanup
-        await msg.delete() # Delete the progress message
+        # 4. Cleanup
+        await msg.delete()
         if os.path.exists(out_filename):
             os.remove(out_filename)
-            print(f"Cleaned up {out_filename}")
 
     except Exception as e:
-        await msg.edit_text(f"❌ **Error Ho Gaya:** {str(e)}")
+        await msg.edit_text(f"❌ **An unexpected error occurred:**\n`{str(e)}`")
         # Cleanup if error occurs
-        if out_filename and os.path.exists(out_filename):
+        if 'out_filename' in locals() and os.path.exists(out_filename):
             os.remove(out_filename)
-            print(f"Cleaned up {out_filename} due to error.")
 
-
-# --- Command Handlers ---
+# --- Bot Command Handlers ---
 
 @bot.on_message(filters.command(["start"]))
 async def start_command(bot: Client, m: Message):
-    # Remove user from bulk mode if they use /start
-    if m.from_user.id in bulk_mode_users:
-        del bulk_mode_users[m.from_user.id]
     await m.reply_text(
-        f"**👋 Hello [{m.from_user.first_name}](tg://user?id={m.from_user.id})!**\n\n"
-        "Mujhe koi bhi **YouTube** ya **Google Drive** (Public) video ka link bhejo.\n"
-        "Main use download karke **@skillneast** tag ke sath bhej dunga.\n\n"
-        "Type /commands for a list of available commands.",
-        reply_markup=InlineKeyboardMarkup(
-            [[InlineKeyboardButton("Developer 👨‍💻", url="https://t.me/skillneast")]]
-        )
+        f"👋 Hello {m.from_user.first_name}!\n\n"
+        "Mujhe koi bhi YouTube ya Google Drive (Public) video ka link bhejo.\n"
+        "Main use download karke `@skillneast` tag ke sath bhej dunga.\n\n"
+        "Ek se zyada link ek sath download karne ke liye `/bulk` command ka istemal karein."
     )
-
-@bot.on_message(filters.command(["commands", "help"]))
-async def commands_command(bot: Client, m: Message):
-    # Remove user from bulk mode if they use /commands
-    if m.from_user.id in bulk_mode_users:
-        del bulk_mode_users[m.from_user.id]
-    commands_list = (
-        "**Available Commands:**\n\n"
-        "**/start** - Bot ko start kare aur welcome message dekhe.\n"
-        "**/commands** (or **/help**) - Sabhi commands ki list dekhe.\n"
-        "**/bulk** - Multiple YouTube/Drive links download kare. Har link ko naye line mein bheje."
-        "**/cancelbulk** - Bulk mode se bahar aane ke liye (agar galti se /bulk shuru kar diya ho)."
-        "\n\n_Video download karne ke liye, bas link bhej dein._"
-    )
-    await m.reply_text(commands_list)
 
 @bot.on_message(filters.command(["bulk"]))
-async def bulk_download_command(bot: Client, m: Message):
+async def bulk_download(bot: Client, m: Message):
+    # Auth Check
     user_id = m.from_user.id
     if user_id not in auth_users and user_id not in sudo_users:
-        await m.reply("**You Are Not Subscribed To This Bot**", quote=True)
+        await m.reply("**You Are Not Authorised To Use This Bot**", quote=True)
         return
 
-    if user_id in bulk_mode_users:
-        await m.reply_text("Ek bulk download pehle se shuru hai. Naye links dene ke liye ya toh pehle wale khatam hone ka intezaar kare, ya /cancelbulk use kare.")
+    # Extract links from the message
+    try:
+        links_text = m.text.split(None, 1)[1]
+        links = links_text.strip().split('\n')
+        links = [link.strip() for link in links if link.strip()] # Remove empty lines
+    except IndexError:
+        await m.reply("`/bulk` command ke baad links bhejein. Har link ek nayi line mein hona chahiye.", quote=True)
+        return
+
+    if not links:
+        await m.reply("Please provide links after the /bulk command.", quote=True)
+        return
+
+    total_links = len(links)
+    await m.reply(f"✅ **Bulk process started for {total_links} links.**\n\nMain ek-ek karke sabhi videos bhej dunga.", quote=True)
+
+    for i, link in enumerate(links):
+        status_msg = await m.reply(f"**Processing Link {i+1}/{total_links}**\n`{link}`", quote=True)
+        try:
+            await process_link(bot, m, link)
+            await status_msg.delete() # Delete status message on success
+        except Exception as e:
+            await status_msg.edit(f"❌ **Failed to process link {i+1}/{total_links}:**\n`{link}`\n\n**Error:** `{e}`")
+            continue # Continue to the next link
+    
+    await m.reply("🎉 **Bulk process finished!**", quote=True)
+
+@bot.on_message(filters.text & ~filters.command)
+async def single_download(bot: Client, m: Message):
+    # Auth Check
+    user_id = m.from_user.id
+    if auth_users and user_id not in auth_users and user_id not in sudo_users:
+        await m.reply("**You Are Not Authorised To Use This Bot**", quote=True)
+        return
+
+    url = m.text.strip()
+    if not (url.startswith("http://") or url.startswith("https://")):
+        await m.reply_text("Please send a valid Link starting with http or https.")
         return
     
-    bulk_mode_users[user_id] = True # Set user in bulk mode
-    
-    await m.reply_text(
-        "**Bulk Download Mode Shuru Hua:**\n"
-        "Ab mujhe ek message mein multiple YouTube/Google Drive links bhejo.\n"
-        "Har link ek naye line mein hona chahiye.\n\n"
-        "Example:\n"
-        "`https://www.youtube.com/watch?v=video1`\n"
-        "`https://drive.google.com/file/d/video2/view`\n\n"
-        "Bulk mode se bahar aane ke liye /cancelbulk type kare."
-    )
-
-@bot.on_message(filters.command(["cancelbulk"]))
-async def cancel_bulk_command(bot: Client, m: Message):
-    user_id = m.from_user.id
-    if user_id in bulk_mode_users:
-        del bulk_mode_users[user_id]
-        await m.reply_text("Bulk download mode cancel kar diya gaya hai. Ab aap single links bhej sakte hain ya /bulk dobara shuru kar sakte hain.")
-    else:
-        await m.reply_text("Aap bulk download mode mein nahi hain.")
+    # Process the single link
+    await process_link(bot, m, url)
 
 
-# This handler will catch all text messages that are NOT commands
-@bot.on_message(filters.text & ~filters.command(["start", "commands", "help", "bulk", "cancelbulk"]))
-async def handle_text_messages(bot: Client, m: Message):
-    user_id = m.from_user.id
+# --- Start The Bot ---
+async def main():
+    print("Bot Starting...")
+    await bot.start()
+    print("Bot Started Successfully!")
+    await asyncio.Event().wait() # Keep the bot running
 
-    # If the user is in bulk mode, process the message as bulk links
-    if user_id in bulk_mode_users:
-        del bulk_mode_users[user_id] # Exit bulk mode after receiving links
-
-        raw_lines = m.text.split('\n')
-        links_to_process = []
-
-        for line in raw_lines:
-            match = re.search(URL_REGEX, line)
-            if match:
-                extracted_url = match.group(0).strip()
-                if extracted_url.startswith("http://") or extracted_url.startswith("https://"):
-                    links_to_process.append(extracted_url)
-            
-        if not links_to_process:
-            await m.reply_text("Koi valid link nahi mila. Kripya sahi format mein links bheje.", quote=True)
-            return
-
-        await m.reply_text(f"**Bulk download shuru ho raha hai for {len(links_to_process)} links.**", quote=True)
-        
-        for i, link in enumerate(links_to_process):
-            await m.reply_text(f"**Link {i+1}/{len(links_to_process)} Process Ho Raha Hai:**", quote=True)
-            await process_single_link(bot, m, link)
-            await asyncio.sleep(2) # Small delay between downloads
-
-        await m.reply_text("**Bulk download complete!**", quote=True)
-    
-    # If not in bulk mode, treat as a single link
-    else:
-        # Auth check for single link processing
-        if user_id not in auth_users and user_id not in sudo_users:
-            await m.reply("**You Are Not Subscribed To This Bot**", quote=True)
-            return
-
-        url = m.text.strip()
-        match = re.search(URL_REGEX, url)
-        if not match:
-            await m.reply_text("Please send a valid Link starting with http or https.", quote=True)
-            return
-        
-        clean_url = match.group(0).strip()
-        # Double check if the extracted part is truly a URL
-        if not (clean_url.startswith("http://") or clean_url.startswith("https://")):
-            await m.reply_text("Please send a valid Link starting with http or https.", quote=True)
-            return
-            
-        await process_single_link(bot, m, clean_url)
-
-
-print("Bot Started...")
-bot.run()
+if __name__ == "__main__":
+    asyncio.run(main())
