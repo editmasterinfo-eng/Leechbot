@@ -55,7 +55,22 @@ async def progress_bar(current, total, message_obj, start_time, status_text, tas
         except Exception: pass
 # ------------------------------------------------------------------------------------------
 
-# --- REDIS SETUP (Updated with better checks) ---
+# <<< FIX START: New function to animate status message >>>
+async def animate_status(message, stop_event):
+    """Animates the status message to show the bot is working."""
+    animation_chars = ["⢿", "⣻", "⣽", "⣾", "⣷", "⣯", "⣟", "⡿"]
+    idx = 0
+    while not stop_event.is_set():
+        try:
+            await message.edit_text(f"🖇️ Merging videos... {animation_chars[idx]}")
+            idx = (idx + 1) % len(animation_chars)
+            await asyncio.sleep(0.3)
+        except Exception:
+            # Message might be deleted or something else happened
+            break
+# <<< FIX END >>>
+
+# --- REDIS SETUP ---
 db = None
 try:
     redis_url = os.environ.get("REDIS_URL")
@@ -65,25 +80,19 @@ try:
         logger.info("✅✅✅ Successfully connected to Redis database! ✅✅✅")
     else:
         logger.warning("❌ REDIS_URL environment variable not found. Intro feature will be disabled.")
-except redis.exceptions.ConnectionError as e:
-    logger.error(f"❌❌❌ Failed to connect to Redis: {e} ❌❌❌")
-    logger.error("Please check your REDIS_URL in Render.com environment variables.")
 except Exception as e:
-    logger.error(f"An unexpected error occurred with Redis: {e}")
+    logger.error(f"❌❌❌ Failed to connect to Redis: {e}")
 
 # --- COMMANDS ---
-
 @bot.on_message(filters.command(["setvideo"]) & filters.user(sudo_users))
 async def set_intro_link_db(bot: Client, m: Message):
     if not db:
-        return await m.reply_text("❌ **Database Error:**\nBot Redis database se connect nahi hai. Kripya logs check karein.")
+        return await m.reply_text("❌ **Database Error:**\nBot Redis database se connect nahi hai.")
     if len(m.command) < 2:
         return await m.reply_text("**Usage:** `/setvideo <direct_download_link>`")
-    
     link = m.command[1]
     if not link.startswith(("http://", "https://")):
         return await m.reply_text("❌ Please provide a valid URL.")
-        
     try:
         db.set("intro_video_link", link)
         await m.reply_text(f"✅ **Success!** Intro link has been set to:\n`{link}`")
@@ -95,7 +104,6 @@ async def set_intro_link_db(bot: Client, m: Message):
 async def check_intro_link_db(bot: Client, m: Message):
     if not db:
         return await m.reply_text("❌ **Database Error:**\nBot Redis database se connect nahi hai.")
-    
     link = db.get("intro_video_link")
     if link:
         await m.reply_text(f"✅ **Current intro link is:**\n`{link}`")
@@ -129,28 +137,25 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
                 if not os.path.exists(temp_intro_path):
                     raise Exception("Intro video link se download nahi ho payi.")
                 
-                await status_msg.edit_text(f"{task_info_text}🖇️ Merging videos... (This may take a moment)")
                 name, ext = os.path.splitext(downloaded_file)
                 final_output_file = f"{name} @skillneast{ext}"
                 
-                # <<< FIX START: YAHAN PAR MAIN CHANGE KIYA GAYA HAI >>>
-                # Ye naya command pehle intro video [0:v] ko main video [1:v] ke reference se scale (resize) karega.
-                # Fir scaled intro video aur main video ko concatinate (jodega).
-                # Isse resolution mismatch ka error nahi aayega.
+                # <<< FIX START: Speeding up merge and adding animation >>>
+                stop_event = asyncio.Event()
+                animation_task = asyncio.create_task(animate_status(status_msg, stop_event))
                 
                 ffmpeg_command = [
-                    'ffmpeg',
+                    'ffmpeg', '-y', # -y to overwrite output file if it exists
                     '-i', temp_intro_path,
                     '-i', downloaded_file,
                     '-filter_complex', '[0:v][1:v]scale2ref[intro_scaled][main_ref];[intro_scaled][0:a][main_ref][1:a]concat=n=2:v=1:a=1[v][a]',
                     '-map', '[v]',
                     '-map', '[a]',
-                    '-preset', 'veryfast', # Taaki merging jaldi ho
-                    '-c:v', 'libx264',    # Standard video codec
-                    '-c:a', 'aac',        # Standard audio codec
+                    '-preset', 'ultrafast',  # Changed to 'ultrafast' for max speed
+                    '-c:v', 'libx264',
+                    '-c:a', 'aac',
                     final_output_file
                 ]
-                
                 # <<< FIX END >>>
 
                 process = await asyncio.create_subprocess_exec(
@@ -160,11 +165,16 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
                 )
                 _, stderr = await process.communicate()
                 
+                # Stop the animation task
+                stop_event.set()
+                await animation_task
+                
                 if process.returncode != 0:
                     error_message = stderr.decode().strip()
                     logger.error(f"FFMPEG ERROR: {error_message}")
-                    raise Exception(f"FFmpeg Error:\n`{error_message[-500:]}`") # Last 500 characters of error
-                    
+                    raise Exception(f"FFmpeg Error:\n`{error_message[-500:]}`")
+                
+                await status_msg.edit_text("✅ Merging complete!")
                 os.remove(downloaded_file)
                 downloaded_file = final_output_file
             else:
@@ -173,7 +183,6 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
                 os.rename(downloaded_file, final_filename)
                 downloaded_file = final_filename
         else:
-            # Baaki links ka logic pehle jaisa hi
             ydl_opts_info = {'logger': MyLogger(), 'quiet': True, 'no_warnings': True}
             with YoutubeDL(ydl_opts_info) as ydl:
                 info = await asyncio.get_event_loop().run_in_executor(None, lambda: ydl.extract_info(url, download=False))
@@ -206,7 +215,7 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
         if final_output_file and os.path.exists(final_output_file) and final_output_file != downloaded_file: os.remove(final_output_file)
         if os.path.exists(temp_intro_path): os.remove(temp_intro_path)
 
-# --- Baaki saare handlers (/start, /help, /bulk, single_download) pehle jaise hi rahenge ---
+# --- Baaki saare handlers ---
 @bot.on_message(filters.command(["start"]))
 async def start_command(bot: Client, m: Message):
     await m.reply_text(f"👋 **Hi {m.from_user.first_name}!**\n/help for more info.", quote=True)
