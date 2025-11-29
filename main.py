@@ -8,14 +8,12 @@ import logging
 import re
 import subprocess
 import redis # Redis library import
-from functools import partial
+import gdown
 from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message
-
 from config import api_id, api_hash, bot_token, auth_users, sudo_users
 from yt_dlp import YoutubeDL
-import gdown
 
 # --- Boilerplate code (Logging, Flask, Helpers) ---
 class DummyWriter:
@@ -53,22 +51,16 @@ async def progress_bar(current, total, message_obj, start_time, status_text, tas
         tmp = (f"{task_info_text}{prog}**📦 Done:** {humanbytes(current)}/{humanbytes(total)}\n**🚀 Speed:** {humanbytes(s)}/s\n**⏳ ETA:** {time_formatter(eta)}\n\n**{status_text}**")
         try: await message_obj.edit_text(text=tmp)
         except Exception: pass
-# ------------------------------------------------------------------------------------------
 
-# <<< FIX START: New function to animate status message >>>
-async def animate_status(message, stop_event):
-    """Animates the status message to show the bot is working."""
+async def animate_status(message, text, stop_event):
     animation_chars = ["⢿", "⣻", "⣽", "⣾", "⣷", "⣯", "⣟", "⡿"]
     idx = 0
     while not stop_event.is_set():
         try:
-            await message.edit_text(f"🖇️ Merging videos... {animation_chars[idx]}")
+            await message.edit_text(f"{text} {animation_chars[idx]}")
             idx = (idx + 1) % len(animation_chars)
             await asyncio.sleep(0.3)
-        except Exception:
-            # Message might be deleted or something else happened
-            break
-# <<< FIX END >>>
+        except Exception: break
 
 # --- REDIS SETUP ---
 db = None
@@ -80,41 +72,47 @@ try:
         logger.info("✅✅✅ Successfully connected to Redis database! ✅✅✅")
     else:
         logger.warning("❌ REDIS_URL environment variable not found. Intro feature will be disabled.")
-except Exception as e:
-    logger.error(f"❌❌❌ Failed to connect to Redis: {e}")
+except Exception as e: logger.error(f"❌❌❌ Failed to connect to Redis: {e}")
 
 # --- COMMANDS ---
 @bot.on_message(filters.command(["setvideo"]) & filters.user(sudo_users))
 async def set_intro_link_db(bot: Client, m: Message):
-    if not db:
-        return await m.reply_text("❌ **Database Error:**\nBot Redis database se connect nahi hai.")
-    if len(m.command) < 2:
-        return await m.reply_text("**Usage:** `/setvideo <direct_download_link>`")
+    if not db: return await m.reply_text("❌ **Database Error:**\nBot Redis database se connect nahi hai.")
+    if len(m.command) < 2: return await m.reply_text("**Usage:** `/setvideo <direct_download_link>`")
     link = m.command[1]
-    if not link.startswith(("http://", "https://")):
-        return await m.reply_text("❌ Please provide a valid URL.")
-    try:
-        db.set("intro_video_link", link)
-        await m.reply_text(f"✅ **Success!** Intro link has been set to:\n`{link}`")
-    except Exception as e:
-        logger.error(f"Error saving to database: {e}")
-        await m.reply_text(f"❌ **Database Error:**\nLink save nahi ho paya. ` {e} `")
+    db.set("intro_video_link", link)
+    await m.reply_text(f"✅ **Success!** Intro video link set kar diya gaya hai.")
+
+@bot.on_message(filters.command(["setphoto"]) & filters.user(sudo_users))
+async def set_photo_link_db(bot: Client, m: Message):
+    if not db: return await m.reply_text("❌ **Database Error:**\nBot Redis database se connect nahi hai.")
+    if len(m.command) < 2: return await m.reply_text("**Usage:** `/setphoto <direct_image_link>`")
+    link = m.command[1]
+    db.set("intro_photo_link", link)
+    await m.reply_text(f"✅ **Success!** Intro photo link set kar diya gaya hai.")
+
+@bot.on_message(filters.command(["delintro"]) & filters.user(sudo_users))
+async def del_intro(bot: Client, m: Message):
+    if not db: return await m.reply_text("❌ **Database Error:**\nBot Redis database se connect nahi hai.")
+    db.delete("intro_video_link")
+    db.delete("intro_photo_link")
+    await m.reply_text("✅ **Success!** Sabhi intro settings delete kar di gayi hain.")
 
 @bot.on_message(filters.command(["checkintro"]) & filters.user(sudo_users))
-async def check_intro_link_db(bot: Client, m: Message):
-    if not db:
-        return await m.reply_text("❌ **Database Error:**\nBot Redis database se connect nahi hai.")
-    link = db.get("intro_video_link")
-    if link:
-        await m.reply_text(f"✅ **Current intro link is:**\n`{link}`")
-    else:
-        await m.reply_text("❌ **No intro link found in the database.**\nUse `/setvideo <link>` to set one.")
+async def check_intro(bot: Client, m: Message):
+    if not db: return await m.reply_text("❌ **Database Error:**\nBot Redis database se connect nahi hai.")
+    video_link = db.get("intro_video_link")
+    photo_link = db.get("intro_photo_link")
+    reply = "📝 **Current Intro Settings:**\n\n"
+    reply += f"🎬 **Video Intro:**\n`{video_link}`\n\n" if video_link else "🎬 **Video Intro:** `Not Set`\n\n"
+    reply += f"🖼️ **Photo Intro:**\n`{photo_link}`" if photo_link else "🖼️ **Photo Intro:** `Not Set`"
+    await m.reply_text(reply)
 
 # --- MAIN LOGIC ---
 async def process_link(client: Client, m: Message, url: str, status_msg: Message, task_info_text: str = ""):
     downloaded_file = None
     final_output_file = None
-    temp_intro_path = f"temp_intro_{m.id}.mp4"
+    temp_intro_path = f"temp_intro_{m.id}"
 
     try:
         await status_msg.edit_text(f"{task_info_text}🔎 Analyzing Link...")
@@ -126,63 +124,71 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
             if downloaded_file is None: raise Exception("File not found or permission denied.")
 
             is_video = downloaded_file.lower().endswith(video_extensions)
-            intro_link = db.get("intro_video_link") if db and is_video else None
+            
+            # Decide which intro to use
+            intro_to_use = None
+            if db and is_video:
+                if db.exists("intro_video_link"): intro_to_use = "video"
+                elif db.exists("intro_photo_link"): intro_to_use = "photo"
 
-            if is_video and intro_link:
+            if intro_to_use == "video":
+                # Video intro logic (pehle jaisa)
+                intro_link = db.get("intro_video_link")
                 await status_msg.edit_text(f"{task_info_text}📥 Downloading intro video...")
-                ydl_opts = {'outtmpl': temp_intro_path, 'logger': MyLogger()}
-                with YoutubeDL(ydl_opts) as ydl:
-                    await asyncio.get_event_loop().run_in_executor(None, lambda: ydl.download([intro_link]))
-                
-                if not os.path.exists(temp_intro_path):
-                    raise Exception("Intro video link se download nahi ho payi.")
+                gdown.download(intro_link, f"{temp_intro_path}.mp4", quiet=True)
+                if not os.path.exists(f"{temp_intro_path}.mp4"): raise Exception("Intro video download nahi ho payi.")
                 
                 name, ext = os.path.splitext(downloaded_file)
                 final_output_file = f"{name} @skillneast{ext}"
-                
-                # <<< FIX START: Speeding up merge and adding animation >>>
-                stop_event = asyncio.Event()
-                animation_task = asyncio.create_task(animate_status(status_msg, stop_event))
-                
-                ffmpeg_command = [
-                    'ffmpeg', '-y', # -y to overwrite output file if it exists
-                    '-i', temp_intro_path,
-                    '-i', downloaded_file,
-                    '-filter_complex', '[0:v][1:v]scale2ref[intro_scaled][main_ref];[intro_scaled][0:a][main_ref][1:a]concat=n=2:v=1:a=1[v][a]',
-                    '-map', '[v]',
-                    '-map', '[a]',
-                    '-preset', 'ultrafast',  # Changed to 'ultrafast' for max speed
-                    '-c:v', 'libx264',
-                    '-c:a', 'aac',
-                    final_output_file
-                ]
-                # <<< FIX END >>>
 
-                process = await asyncio.create_subprocess_exec(
-                    *ffmpeg_command, 
-                    stdout=asyncio.subprocess.PIPE, 
-                    stderr=asyncio.subprocess.PIPE
-                )
+                stop_event = asyncio.Event()
+                animation_task = asyncio.create_task(animate_status(status_msg, f"{task_info_text}🖇️ Merging videos...", stop_event))
+
+                ffmpeg_command = ['ffmpeg', '-y', '-i', f"{temp_intro_path}.mp4", '-i', downloaded_file, '-filter_complex', '[0:v][1:v]scale2ref[v0][v1];[v0][0:a][v1][1:a]concat=n=2:v=1:a=1[v][a]', '-map', '[v]', '-map', '[a]', '-preset', 'ultrafast', '-c:v', 'libx264', '-c:a', 'aac', final_output_file]
+                
+                process = await asyncio.create_subprocess_exec(*ffmpeg_command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                 _, stderr = await process.communicate()
                 
-                # Stop the animation task
-                stop_event.set()
-                await animation_task
+                stop_event.set(); await animation_task
+                if process.returncode != 0: raise Exception(f"FFmpeg Error:\n`{stderr.decode().strip()[-500:]}`")
                 
-                if process.returncode != 0:
-                    error_message = stderr.decode().strip()
-                    logger.error(f"FFMPEG ERROR: {error_message}")
-                    raise Exception(f"FFmpeg Error:\n`{error_message[-500:]}`")
-                
-                await status_msg.edit_text("✅ Merging complete!")
-                os.remove(downloaded_file)
+                os.remove(downloaded_file); os.remove(f"{temp_intro_path}.mp4")
                 downloaded_file = final_output_file
+
+            elif intro_to_use == "photo":
+                # Naya photo intro logic
+                intro_link = db.get("intro_photo_link")
+                await status_msg.edit_text(f"{task_info_text}📥 Downloading intro photo...")
+                gdown.download(intro_link, f"{temp_intro_path}.jpg", quiet=True)
+                if not os.path.exists(f"{temp_intro_path}.jpg"): raise Exception("Intro photo download nahi ho payi.")
+                
+                name, ext = os.path.splitext(downloaded_file)
+                final_output_file = f"{name} @skillneast{ext}"
+
+                stop_event = asyncio.Event()
+                animation_task = asyncio.create_task(animate_status(status_msg, f"{task_info_text}🖇️ Attaching photo...", stop_event))
+
+                # Ye command image se 5 sec ka video banata hai aur audio ko copy kar leta hai
+                ffmpeg_command = ['ffmpeg', '-y', '-loop', '1', '-t', '5', '-i', f"{temp_intro_path}.jpg", '-i', downloaded_file, '-filter_complex', "[0:v]pix_fmt=yuv420p,scale='iw*min(1920/iw,1080/ih)':'ih*min(1920/iw,1080/ih)',pad=1920:1080:(1920-iw)/2:(1080-ih)/2,setsar=1[v0];[v0][1:v]concat=n=2:v=1[v]", '-map', '[v]', '-map', '1:a?', '-c:a', 'copy', '-preset', 'ultrafast', '-shortest', final_output_file]
+
+                process = await asyncio.create_subprocess_exec(*ffmpeg_command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
+                _, stderr = await process.communicate()
+                
+                stop_event.set(); await animation_task
+                if process.returncode != 0: raise Exception(f"FFmpeg Error:\n`{stderr.decode().strip()[-500:]}`")
+                
+                os.remove(downloaded_file); os.remove(f"{temp_intro_path}.jpg")
+                downloaded_file = final_output_file
+
             else:
+                # Koi intro nahi, sirf rename karo
                 name, ext = os.path.splitext(downloaded_file)
                 final_filename = f"{name} @skillneast{ext}"
                 os.rename(downloaded_file, final_filename)
                 downloaded_file = final_filename
+
         else:
+            # YouTube-DL links (pehle jaisa)
             ydl_opts_info = {'logger': MyLogger(), 'quiet': True, 'no_warnings': True}
             with YoutubeDL(ydl_opts_info) as ydl:
                 info = await asyncio.get_event_loop().run_in_executor(None, lambda: ydl.extract_info(url, download=False))
@@ -194,7 +200,7 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
             if not os.path.exists(downloaded_file): raise Exception("Download Failed.")
 
         base_name = os.path.basename(downloaded_file)
-        await status_msg.edit_text(f"{task_info_text}⬆️ Uploading: `{base_name}`")
+        await status_msg.edit_text(f"{task_info_text}✅ Done! Now Uploading: `{base_name}`")
         caption = f"📂 **{base_name}**\n\n👤 **User:** {m.from_user.mention}\n🤖 **Bot:** @skillneast"
         progress_args = (status_msg, time.time(), "⬆️ Uploading...", task_info_text)
         
@@ -203,8 +209,7 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
         else:
             await m.reply_document(document=downloaded_file, caption=caption, progress=progress_bar, progress_args=progress_args)
         
-        if not task_info_text: 
-            await status_msg.delete()
+        if not task_info_text: await status_msg.delete()
             
     except Exception as e:
         await status_msg.edit_text(f"{task_info_text}❌ **Error:**\n`{str(e)}`")
@@ -212,10 +217,12 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
         
     finally:
         if downloaded_file and os.path.exists(downloaded_file): os.remove(downloaded_file)
-        if final_output_file and os.path.exists(final_output_file) and final_output_file != downloaded_file: os.remove(final_output_file)
-        if os.path.exists(temp_intro_path): os.remove(temp_intro_path)
+        if final_output_file and os.path.exists(final_output_file): os.remove(final_output_file)
+        for f in [f"{temp_intro_path}.mp4", f"{temp_intro_path}.jpg"]:
+            if os.path.exists(f): os.remove(f)
 
-# --- Baaki saare handlers ---
+
+# --- HELP & OTHER HANDLERS ---
 @bot.on_message(filters.command(["start"]))
 async def start_command(bot: Client, m: Message):
     await m.reply_text(f"👋 **Hi {m.from_user.first_name}!**\n/help for more info.", quote=True)
@@ -228,13 +235,16 @@ async def help_command(bot: Client, m: Message):
                  "🔹 `/bulk <links>` - Download multiple links.\n")
     if m.from_user.id in sudo_users:
         help_text += ("\n**Admin Commands:**\n"
-                      "🔹 `/setvideo <url>` - Set intro video from a direct link.\n"
-                      "🔹 `/checkintro` - Check the currently set intro video in the database.")
+                      "🔹 `/setvideo <url>` - Video ko intro banaye.\n"
+                      "🔹 `/setphoto <url>` - Image ko 5s ka intro banaye.\n"
+                      "🔹 `/checkintro` - Check karein ki kaunsa intro set hai.\n"
+                      "🔹 `/delintro` - Sabhi intro settings delete karein.")
     await m.reply_text(help_text, quote=True)
 
 @bot.on_message(filters.command(["bulk"]))
 async def bulk_download(bot: Client, m: Message):
     if m.from_user.id not in auth_users and m.from_user.id not in sudo_users: return
+    # ... (bulk logic pehle jaisa hi hai)
     if len(m.command) > 1: raw_text = m.text.split(maxsplit=1)[1]
     elif m.reply_to_message and m.reply_to_message.text: raw_text = m.reply_to_message.text
     else: return await m.reply_text("**Usage:** `/bulk <link1> <link2> ...`")
@@ -251,7 +261,7 @@ async def bulk_download(bot: Client, m: Message):
             failed += 1; await asyncio.sleep(4)
     await bulk_status_msg.edit_text(f"✅ **Bulk Complete!**\n\n**Total:** {total_links}, **Successful:** {completed}, **Failed:** {failed}")
 
-@bot.on_message(filters.text & ~filters.command(["start", "help", "bulk", "setvideo", "checkintro"]))
+@bot.on_message(filters.text & ~filters.command(["start", "help", "bulk", "setvideo", "setphoto", "checkintro", "delintro"]))
 async def single_download(bot: Client, m: Message):
     if m.from_user.id not in auth_users and m.from_user.id not in sudo_users: return
     url = m.text.strip()
@@ -259,7 +269,7 @@ async def single_download(bot: Client, m: Message):
         status_msg = await m.reply_text("🚀 Preparing to download...", quote=True)
         try: await process_link(bot, m, url, status_msg)
         except Exception: pass
-        
+
 # ------------------- MAIN EXECUTION -------------------
 if __name__ == "__main__":
     print("Starting Flask Server for Keep-Alive...")
