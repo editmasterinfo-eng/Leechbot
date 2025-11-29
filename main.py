@@ -1,8 +1,8 @@
 import os
 import time
 import asyncio
-import re # Import regex for URL extraction
-import requests # For generic file downloads (like PDFs)
+import re
+import requests # Still good to have for future generic file handling, though not actively used for PDFs with yt-dlp here
 from pyrogram import Client, filters
 from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
 from config import api_id, api_hash, bot_token, auth_users, sudo_users
@@ -16,6 +16,9 @@ bot = Client(
     bot_token=bot_token
 )
 
+# Dictionary to store users in bulk mode
+bulk_mode_users = {}
+
 # --- Helper Functions for Progress Bar ---
 async def progress_for_pyrogram(current, total, ud_type, message, start_time):
     """
@@ -24,29 +27,24 @@ async def progress_for_pyrogram(current, total, ud_type, message, start_time):
     now = time.time()
     diff = now - start_time
     if round(diff % 10.00) == 0 or current == total:
-        # Avoid division by zero if diff is too small
         if diff < 1:
             diff = 1
         
         percentage = current * 100 / total
         
-        # Calculate speed
         speed = current / diff
         speed_string = f"{humanbytes(speed)}/s"
         
-        # Calculate ETA
         try:
             eta = int((total - current) / speed)
             eta_string = f"{str(datetime.timedelta(seconds=eta))} left"
         except ZeroDivisionError:
-            eta_string = "Calculating..."
+            eta_string = "Calculating..." # or "N/A"
         
-        # ASCII progress bar
         bar_length = 10
         filled_length = int(bar_length * current // total)
         bar = '█' * filled_length + '░' * (bar_length - filled_length)
         
-        # Construct the progress text
         progress_text = (
             f"**{ud_type}**\n"
             f"**Progress:** `{bar}` {percentage:.2f}%\n"
@@ -74,7 +72,7 @@ def humanbytes(size):
         n += 1
     return str(round(size, 2)) + " " + dic_powerN[n] + 'B'
 
-import datetime # Import datetime for ETA
+import datetime
 
 # yt-dlp's progress hook function (for download)
 async def download_progress_hook(d, message, start_time, ud_type="Downloading"):
@@ -92,32 +90,12 @@ URL_REGEX = r"(?i)\b((?:https?://|www\d{0,3}[.]|[a-z0-9.\-]+[.][a-z]{2,4}/)(?:[^
 
 # --- Main Download Logic (Refactored for better reusability) ---
 async def process_single_link(bot_client: Client, original_message: Message, url: str):
-    user_id = original_message.from_user.id
-    if user_id not in auth_users and user_id not in sudo_users:
-        await original_message.reply("**You Are Not Subscribed To This Bot**", quote=True)
-        return
-
-    # Reply to the user to show that processing for this specific link has started
+    
     msg = await original_message.reply_text(f"🔎 **Link Process Ho Raha Hai:** `{url}`\n**Jankari Nikali Jaa Rahi Hai...**", quote=True)
 
     out_filename = None # Initialize to None for cleanup
 
     try:
-        # Check if it's a direct file download (like PDF from Drive)
-        if "drive.google.com" in url and ("file/d/" in url or "uc?id=" in url):
-            # Try to get file extension if possible from the URL
-            file_extension = ".dat" # Default
-            match = re.search(r'\.([a-zA-Z0-9]+)(?:[\?\/]|$)', url)
-            if match:
-                file_extension = f".{match.group(1)}"
-            
-            # For Google Drive files, yt-dlp might fail for non-video.
-            # We can try a direct download using requests for such cases.
-            # Simplified approach: If yt-dlp fails, we can assume it's not a video it can handle
-            # and potentially try generic download. But for now, let's keep it within yt-dlp's scope
-            # and let it fail if it's not a video/audio.
-            pass # Continue to yt-dlp logic
-            
         # 2. Extract Info using yt-dlp
         ydl_opts = {
             'format': 'best',
@@ -191,7 +169,7 @@ async def process_single_link(bot_client: Client, original_message: Message, url
             return
 
         # Determine if it's a video or document based on extension
-        if final_file_extension.lower() in ['.mp4', '.mkv', '.webm', '.avi', '.mov']:
+        if final_file_extension.lower() in ['.mp4', '.mkv', '.webm', '.avi', '.mov', '.flv']: # Added .flv
             await original_message.reply_video(
                 video=out_filename,
                 caption=f"**{final_title}**\n\nDownloaded by: {original_message.from_user.mention}",
@@ -225,6 +203,9 @@ async def process_single_link(bot_client: Client, original_message: Message, url
 
 @bot.on_message(filters.command(["start"]))
 async def start_command(bot: Client, m: Message):
+    # Remove user from bulk mode if they use /start
+    if m.from_user.id in bulk_mode_users:
+        del bulk_mode_users[m.from_user.id]
     await m.reply_text(
         f"**👋 Hello [{m.from_user.first_name}](tg://user?id={m.from_user.id})!**\n\n"
         "Mujhe koi bhi **YouTube** ya **Google Drive** (Public) video ka link bhejo.\n"
@@ -237,17 +218,18 @@ async def start_command(bot: Client, m: Message):
 
 @bot.on_message(filters.command(["commands", "help"]))
 async def commands_command(bot: Client, m: Message):
+    # Remove user from bulk mode if they use /commands
+    if m.from_user.id in bulk_mode_users:
+        del bulk_mode_users[m.from_user.id]
     commands_list = (
         "**Available Commands:**\n\n"
         "**/start** - Bot ko start kare aur welcome message dekhe.\n"
         "**/commands** (or **/help**) - Sabhi commands ki list dekhe.\n"
         "**/bulk** - Multiple YouTube/Drive links download kare. Har link ko naye line mein bheje."
+        "**/cancelbulk** - Bulk mode se bahar aane ke liye (agar galti se /bulk shuru kar diya ho)."
         "\n\n_Video download karne ke liye, bas link bhej dein._"
     )
     await m.reply_text(commands_list)
-
-# Store active bulk handlers to prevent multiple concurrent bulk processes per user
-active_bulk_handlers = {}
 
 @bot.on_message(filters.command(["bulk"]))
 async def bulk_download_command(bot: Client, m: Message):
@@ -256,35 +238,45 @@ async def bulk_download_command(bot: Client, m: Message):
         await m.reply("**You Are Not Subscribed To This Bot**", quote=True)
         return
 
-    if user_id in active_bulk_handlers:
-        await m.reply_text("Ek bulk download pehle se chal raha hai. Kripya uske khatam hone ka intezaar kare ya /cancelbulk use kare (agar banaya ho).")
+    if user_id in bulk_mode_users:
+        await m.reply_text("Ek bulk download pehle se shuru hai. Naye links dene ke liye ya toh pehle wale khatam hone ka intezaar kare, ya /cancelbulk use kare.")
         return
     
-    bulk_prompt_msg = await m.reply_text(
+    bulk_mode_users[user_id] = True # Set user in bulk mode
+    
+    await m.reply_text(
         "**Bulk Download Mode Shuru Hua:**\n"
         "Ab mujhe ek message mein multiple YouTube/Google Drive links bhejo.\n"
         "Har link ek naye line mein hona chahiye.\n\n"
         "Example:\n"
         "`https://www.youtube.com/watch?v=video1`\n"
-        "`https://drive.google.com/file/d/video2/view`"
+        "`https://drive.google.com/file/d/video2/view`\n\n"
+        "Bulk mode se bahar aane ke liye /cancelbulk type kare."
     )
 
-    # Use a temporary handler to capture the next message with links
-    @bot.on_message(filters.text & filters.user(m.from_user.id))
-    async def process_bulk_links(client: Client, message: Message):
-        # Ensure this handler only runs once for the prompt
-        if message.id <= bulk_prompt_msg.id:
-            return
+@bot.on_message(filters.command(["cancelbulk"]))
+async def cancel_bulk_command(bot: Client, m: Message):
+    user_id = m.from_user.id
+    if user_id in bulk_mode_users:
+        del bulk_mode_users[user_id]
+        await m.reply_text("Bulk download mode cancel kar diya gaya hai. Ab aap single links bhej sakte hain ya /bulk dobara shuru kar sakte hain.")
+    else:
+        await m.reply_text("Aap bulk download mode mein nahi hain.")
 
-        # Remove this handler immediately after capturing the links to prevent further triggers
-        client.remove_handler(process_bulk_links)
-        del active_bulk_handlers[user_id] # Mark bulk process as finished for this user
-        
-        raw_lines = message.text.split('\n')
+
+# This handler will catch all text messages that are NOT commands
+@bot.on_message(filters.text & ~filters.command(["start", "commands", "help", "bulk", "cancelbulk"]))
+async def handle_text_messages(bot: Client, m: Message):
+    user_id = m.from_user.id
+
+    # If the user is in bulk mode, process the message as bulk links
+    if user_id in bulk_mode_users:
+        del bulk_mode_users[user_id] # Exit bulk mode after receiving links
+
+        raw_lines = m.text.split('\n')
         links_to_process = []
 
         for line in raw_lines:
-            # Extract URL using regex, ignoring any leading numbers or text
             match = re.search(URL_REGEX, line)
             if match:
                 extracted_url = match.group(0).strip()
@@ -292,38 +284,38 @@ async def bulk_download_command(bot: Client, m: Message):
                     links_to_process.append(extracted_url)
             
         if not links_to_process:
-            await message.reply_text("Koi valid link nahi mila. Kripya sahi format mein links bheje.", quote=True)
+            await m.reply_text("Koi valid link nahi mila. Kripya sahi format mein links bheje.", quote=True)
             return
 
-        await message.reply_text(f"**Bulk download shuru ho raha hai for {len(links_to_process)} links.**", quote=True)
+        await m.reply_text(f"**Bulk download shuru ho raha hai for {len(links_to_process)} links.**", quote=True)
         
         for i, link in enumerate(links_to_process):
-            await message.reply_text(f"**Link {i+1}/{len(links_to_process)} Process Ho Raha Hai:**", quote=True)
-            await process_single_link(bot, message, link) # Pass original message for replying
-            await asyncio.sleep(2) # Small delay between downloads to prevent flooding
+            await m.reply_text(f"**Link {i+1}/{len(links_to_process)} Process Ho Raha Hai:**", quote=True)
+            await process_single_link(bot, m, link)
+            await asyncio.sleep(2) # Small delay between downloads
 
-        await message.reply_text("**Bulk download complete!**", quote=True)
-
-    # Store the handler to manage it later (e.g., removal)
-    active_bulk_handlers[user_id] = process_bulk_links
-    bot.add_handler(process_bulk_links)
-
-
-@bot.on_message(filters.text & ~filters.command(["start", "commands", "help", "bulk"]))
-async def handle_single_link(bot: Client, m: Message):
-    url = m.text.strip()
-    # Apply URL regex to ensure it's a clean URL
-    match = re.search(URL_REGEX, url)
-    if not match:
-        await m.reply_text("Please send a valid Link starting with http or https.", quote=True)
-        return
+        await m.reply_text("**Bulk download complete!**", quote=True)
     
-    clean_url = match.group(0).strip()
-    if not (clean_url.startswith("http://") or clean_url.startswith("https://")):
-        await m.reply_text("Please send a valid Link starting with http or https.", quote=True)
-        return
+    # If not in bulk mode, treat as a single link
+    else:
+        # Auth check for single link processing
+        if user_id not in auth_users and user_id not in sudo_users:
+            await m.reply("**You Are Not Subscribed To This Bot**", quote=True)
+            return
+
+        url = m.text.strip()
+        match = re.search(URL_REGEX, url)
+        if not match:
+            await m.reply_text("Please send a valid Link starting with http or https.", quote=True)
+            return
         
-    await process_single_link(bot, m, clean_url)
+        clean_url = match.group(0).strip()
+        # Double check if the extracted part is truly a URL
+        if not (clean_url.startswith("http://") or clean_url.startswith("https://")):
+            await m.reply_text("Please send a valid Link starting with http or https.", quote=True)
+            return
+            
+        await process_single_link(bot, m, clean_url)
 
 
 print("Bot Started...")
