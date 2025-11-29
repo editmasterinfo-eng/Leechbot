@@ -98,10 +98,9 @@ async def process_link(bot: Client, m: Message, url: str):
             ydl.download([url])
 
         if not os.path.exists(out_filename):
-            # Try to find file with different extension if yt-dlp changed it
             found = False
             for file in os.listdir('.'):
-                if file.startswith(original_title): # Check with original title
+                if file.startswith(original_title):
                     out_filename = file
                     found = True
                     break
@@ -126,7 +125,6 @@ async def process_link(bot: Client, m: Message, url: str):
 
     except Exception as e:
         await msg.edit_text(f"❌ **An unexpected error occurred:**\n`{str(e)}`")
-        # Cleanup if error occurs
         if 'out_filename' in locals() and os.path.exists(out_filename):
             os.remove(out_filename)
 
@@ -149,11 +147,9 @@ async def bulk_download(bot: Client, m: Message):
         await m.reply("**You Are Not Authorised To Use This Bot**", quote=True)
         return
 
-    # Extract links from the message
     try:
         links_text = m.text.split(None, 1)[1]
-        links = links_text.strip().split('\n')
-        links = [link.strip() for link in links if link.strip()] # Remove empty lines
+        links = [link.strip() for link in links_text.strip().split('\n') if link.strip()]
     except IndexError:
         await m.reply("`/bulk` command ke baad links bhejein. Har link ek nayi line mein hona chahiye.", quote=True)
         return
@@ -169,14 +165,15 @@ async def bulk_download(bot: Client, m: Message):
         status_msg = await m.reply(f"**Processing Link {i+1}/{total_links}**\n`{link}`", quote=True)
         try:
             await process_link(bot, m, link)
-            await status_msg.delete() # Delete status message on success
+            await status_msg.delete()
         except Exception as e:
             await status_msg.edit(f"❌ **Failed to process link {i+1}/{total_links}:**\n`{link}`\n\n**Error:** `{e}`")
-            continue # Continue to the next link
+            continue
     
     await m.reply("🎉 **Bulk process finished!**", quote=True)
 
-@bot.on_message(filters.text & ~filters.command)
+# THE FIX IS HERE 👇
+@bot.on_message(filters.text & ~filters.command())
 async def single_download(bot: Client, m: Message):
     # Auth Check
     user_id = m.from_user.id
@@ -189,7 +186,6 @@ async def single_download(bot: Client, m: Message):
         await m.reply_text("Please send a valid Link starting with http or https.")
         return
     
-    # Process the single link
     await process_link(bot, m, url)
 
 
@@ -198,7 +194,7 @@ async def main():
     print("Bot Starting...")
     await bot.start()
     print("Bot Started Successfully!")
-    await asyncio.Event().wait() # Keep the bot running
+    await asyncio.Event().wait()
 
 if __name__ == "__main__":
     asyncio.run(main())
