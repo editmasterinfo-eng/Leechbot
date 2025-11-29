@@ -50,9 +50,6 @@ def keep_alive():
 # ------------------- BOT SETUP -------------------
 bot = Client("bot", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
 
-# Global dictionary to prevent spamming message edits
-progress_last_update = {}
-
 # ------------------- HELPER FUNCTIONS -------------------
 def humanbytes(size):
     if not size: return "0 B"
@@ -74,7 +71,7 @@ def time_formatter(milliseconds: int) -> str:
             (f"{minutes}m, " if minutes else "") +
             (f"{seconds}s, " if seconds else "")).strip(', ') or "0s"
 
-async def progress_bar(current, total, message_obj, start_time, status_text):
+async def progress_bar(current, total, message_obj, start_time, status_text, task_info_text=""):
     now = time.time()
     diff = now - start_time
     if round(diff % 4.00) == 0 or current == total:
@@ -88,7 +85,8 @@ async def progress_bar(current, total, message_obj, start_time, status_text):
             ''.join(["□" for _ in range(20 - math.floor(percentage / 5))]),
             round(percentage, 2))
 
-        tmp = (progress_str +
+        tmp = (f"{task_info_text}"
+               f"{progress_str}"
                f"**📦 Done:** {humanbytes(current)} / {humanbytes(total)}\n"
                f"**🚀 Speed:** {humanbytes(speed)}/s\n"
                f"**⏳ ETA:** {time_formatter(time_to_completion)}\n\n"
@@ -99,14 +97,12 @@ async def progress_bar(current, total, message_obj, start_time, status_text):
             pass
 
 # ------------------- DOWNLOAD LOGIC -------------------
-
-async def download_progress_hook(d, message_obj, start_time, loop):
+async def download_progress_hook(d, message_obj, start_time, loop, task_info_text):
     if d['status'] == 'downloading':
-        message_id = message_obj.id
         now = time.time()
-        
-        if message_id not in progress_last_update or (now - progress_last_update.get(message_id, 0)) > 3:
-            progress_last_update[message_id] = now
+        # Edit message only every 3 seconds to avoid flood waits
+        if not hasattr(download_progress_hook, 'last_update') or (now - download_progress_hook.last_update) > 3:
+            download_progress_hook.last_update = now
             
             total_bytes = d.get('total_bytes') or d.get('total_bytes_estimate')
             if total_bytes:
@@ -120,32 +116,34 @@ async def download_progress_hook(d, message_obj, start_time, loop):
                     ''.join(["□" for _ in range(20 - math.floor(percentage / 5))]),
                     percentage)
 
-                tmp = (progress_str +
+                tmp = (f"{task_info_text}"
+                       f"{progress_str}"
                        f"**📦 Done:** {humanbytes(downloaded_bytes)} / {humanbytes(total_bytes)}\n"
                        f"**🚀 Speed:** {humanbytes(speed) if speed else 0}/s\n"
                        f"**⏳ ETA:** {time_formatter(eta * 1000) if eta else 'N/A'}\n\n"
                        f"**⬇️ Downloading...**")
                 
-                async def edit_message():
-                    try:
-                        await message_obj.edit_text(text=tmp)
-                    except Exception:
-                        pass
-                
-                asyncio.run_coroutine_threadsafe(edit_message(), loop)
+                # Schedule the edit on the main event loop
+                asyncio.run_coroutine_threadsafe(message_obj.edit_text(text=tmp), loop)
 
-async def process_link(client, m, url, is_bulk=False):
-    status_msg = await m.reply_text("🔎 **Analyzing Link...**", quote=True)
+async def process_link(client: Client, m: Message, url: str, status_msg: Message, task_info_text: str = ""):
     final_filename = None
     
     try:
+        await status_msg.edit_text(f"{task_info_text}🔎 **Analyzing Link...**\n`{url}`")
+        
         if "drive.google.com" in url:
-            await status_msg.edit_text("📥 **Downloading from Google Drive...**\n_(Progress bar not available for G-Drive)_")
-            final_filename = await asyncio.get_event_loop().run_in_executor(
+            await status_msg.edit_text(f"{task_info_text}📥 **Downloading from Google Drive...**\n_(Progress bar not available for G-Drive)_")
+            downloaded_file = await asyncio.get_event_loop().run_in_executor(
                 None, lambda: gdown.download(url, fuzzy=True, quiet=False)
             )
-            if final_filename is None:
+            if downloaded_file is None:
                 raise Exception("File not found or permission denied on Google Drive.")
+            
+            # Add @skillneast to the filename
+            name, ext = os.path.splitext(downloaded_file)
+            final_filename = f"{name} @skillneast{ext}"
+            os.rename(downloaded_file, final_filename)
         else:
             ydl_opts_info = {'logger': MyLogger(), 'quiet': True, 'no_warnings': True}
             with YoutubeDL(ydl_opts_info) as ydl:
@@ -156,12 +154,14 @@ async def process_link(client, m, url, is_bulk=False):
                 ext = info_dict.get('ext', 'mp4')
                 safe_title = "".join([c for c in original_title if c.isalnum() or c in (' ', '-', '_')]).strip()
                 if not safe_title: safe_title = f"file_{int(time.time())}"
+                
+                # Add @skillneast to filename here
                 final_filename = f"{safe_title} @skillneast.{ext}"
 
-            await status_msg.edit_text(f"⬇️ **Downloading:** `{safe_title}`")
+            await status_msg.edit_text(f"{task_info_text}⬇️ **Downloading:** `{safe_title}`")
             download_start = time.time()
             main_loop = asyncio.get_event_loop()
-            hook = partial(download_progress_hook, message_obj=status_msg, start_time=download_start, loop=main_loop)
+            hook = partial(download_progress_hook, message_obj=status_msg, start_time=download_start, loop=main_loop, task_info_text=task_info_text)
             
             ydl_opts_down = {
                 'outtmpl': final_filename, 'logger': MyLogger(),
@@ -174,42 +174,51 @@ async def process_link(client, m, url, is_bulk=False):
 
             if not os.path.exists(final_filename):
                 found = False
+                base_name_without_ext = os.path.splitext(final_filename)[0]
                 for file in os.listdir('.'):
-                    if file.startswith(safe_title):
+                    if file.startswith(base_name_without_ext):
                         final_filename, found = file, True
                         break
                 if not found:
-                    await status_msg.edit_text("❌ Download Failed. File not found.")
-                    return
+                    raise Exception("Download Failed. File not found on disk.")
 
-        await status_msg.edit_text(f"⬆️ **Uploading:** `{os.path.basename(final_filename)}`")
+        base_name = os.path.basename(final_filename)
+        await status_msg.edit_text(f"{task_info_text}⬆️ **Uploading:** `{base_name}`")
+        
         upload_start = time.time()
-        caption_text = f"📂 **{os.path.basename(final_filename)}**\n\n👤 **User:** {m.from_user.mention}\n🤖 **Bot:** @skillneast"
+        caption_text = f"📂 **{base_name}**\n\n👤 **User:** {m.from_user.mention}\n🤖 **Bot:** @skillneast"
         video_extensions = ('.mp4', '.mkv', '.webm', '.avi', '.mov')
 
+        progress_args_tuple = (status_msg, upload_start, "⬆️ Uploading...", task_info_text)
+        
         if final_filename.lower().endswith(video_extensions):
             await m.reply_video(
                 video=final_filename, caption=caption_text, supports_streaming=True,
-                progress=progress_bar, progress_args=(status_msg, upload_start, "⬆️ Uploading Video...")
+                progress=progress_bar, progress_args=progress_args_tuple
             )
         else:
             await m.reply_document(
                 document=final_filename, caption=caption_text,
-                progress=progress_bar, progress_args=(status_msg, upload_start, "⬆️ Uploading File...")
+                progress=progress_bar, progress_args=progress_args_tuple
             )
-
-        await status_msg.delete()
-        if final_filename and os.path.exists(final_filename): os.remove(final_filename)
-        if is_bulk: await asyncio.sleep(3)
+        
+        # In bulk mode, we don't delete the status message
+        if not task_info_text:
+            await status_msg.delete()
 
     except Exception as e:
-        logger.error(f"Error in process_link: {e}", exc_info=True)
-        await status_msg.edit_text(f"❌ **An Error Occurred:**\n`{str(e)}`")
-        if final_filename and os.path.exists(final_filename): os.remove(final_filename)
+        error_message = f"{task_info_text}❌ **An Error Occurred:**\n`{str(e)}`"
+        logger.error(f"Error in process_link for URL {url}: {e}", exc_info=True)
+        await status_msg.edit_text(error_message)
+        # Raise the exception so the bulk handler knows it failed
+        raise e
+    finally:
+        if final_filename and os.path.exists(final_filename):
+            os.remove(final_filename)
 
 # ------------------- COMMANDS -------------------
 @bot.on_message(filters.command(["start"]))
-async def start_command(bot, m: Message):
+async def start_command(bot: Client, m: Message):
     await m.reply_text(
         f"👋 **Hi {m.from_user.first_name}! Main ek URL Downloader Bot hoon.**\n\n"
         "Aap mujhe koi bhi direct link (YouTube, Instagram, Google Drive, etc.) bhej sakte hain aur main use download karke aapko bhej dunga.\n\n"
@@ -217,7 +226,7 @@ async def start_command(bot, m: Message):
     )
 
 @bot.on_message(filters.command(["help"]))
-async def help_command(bot, m: Message):
+async def help_command(bot: Client, m: Message):
     await m.reply_text(
         "**📜 Bot Help Section**\n\n"
         "**Kaise Use Karein:**\n"
@@ -230,32 +239,61 @@ async def help_command(bot, m: Message):
     )
 
 @bot.on_message(filters.command(["bulk"]))
-async def bulk_download(bot, m: Message):
+async def bulk_download(bot: Client, m: Message):
     if m.from_user.id not in auth_users and m.from_user.id not in sudo_users:
         return await m.reply_text("🚫 You are not authorized to use this command.")
     
-    if len(m.command) > 1: raw_text = m.text.split(maxsplit=1)[1]
-    elif m.reply_to_message and m.reply_to_message.text: raw_text = m.reply_to_message.text
-    else: return await m.reply_text("**Usage:** `/bulk <link1> <link2> ...`\nAap command ke baad links de sakte hain ya kisi message ko reply karke jisme links ho.")
+    if len(m.command) > 1:
+        raw_text = m.text.split(maxsplit=1)[1]
+    elif m.reply_to_message and m.reply_to_message.text:
+        raw_text = m.reply_to_message.text
+    else:
+        return await m.reply_text("**Usage:** `/bulk <link1> <link2> ...`\nAap command ke baad links de sakte hain ya kisi message ko reply karke jisme links ho.")
 
     links = re.findall(r'https?://[^\s]+', raw_text)
-    if not links: return await m.reply_text("❓ No valid links found in the message.")
+    if not links:
+        return await m.reply_text("❓ No valid links found in the message.")
         
-    await m.reply_text(f"📦 **Bulk Queue Started:** Found {len(links)} links. Processing one by one...")
+    total_links = len(links)
+    bulk_status_msg = await m.reply_text(f"📦 **Bulk Queue Started:** Found {total_links} links. Processing one by one...")
+    
+    completed = 0
+    failed = 0
+    
     for i, link in enumerate(links, 1):
-        await m.reply_text(f"**Processing Link {i}/{len(links)}:**\n`{link}`")
-        await process_link(bot, m, link, is_bulk=True)
-    await m.reply_text("✅ **Bulk Download Complete!** All links have been processed.")
+        task_info = (f"**📊 Task Status**\n"
+                     f"**Total:** {total_links} | **✅ Completed:** {completed} | **❌ Failed:** {failed}\n\n"
+                     f"**▶️ Processing Link {i}/{total_links}:**\n")
+        try:
+            await process_link(bot, m, link, bulk_status_msg, task_info_text=task_info)
+            completed += 1
+        except Exception as e:
+            failed += 1
+            # The error is already logged and shown in process_link
+            # We'll just wait a bit before moving to the next one
+            await asyncio.sleep(4)
+    
+    await bulk_status_msg.edit_text(
+        f"✅ **Bulk Download Complete!**\n\n"
+        f"**Total Links:** {total_links}\n"
+        f"**✅ Successful:** {completed}\n"
+        f"**❌ Failed:** {failed}"
+    )
 
-# THIS IS THE FIXED LINE
 @bot.on_message(filters.text & ~filters.command(["start", "help", "bulk"]))
-async def single_download(bot, m: Message):
+async def single_download(bot: Client, m: Message):
     if m.from_user.id not in auth_users and m.from_user.id not in sudo_users:
         return
         
     url = m.text.strip()
     if url.startswith(("http://", "https://")):
-        await process_link(bot, m, url, is_bulk=False)
+        # For single downloads, create a temporary status message
+        status_msg = await m.reply_text("🚀 **Preparing to download...**", quote=True)
+        try:
+            await process_link(bot, m, url, status_msg)
+        except Exception:
+            # Error is handled inside process_link, just pass here
+            pass
 
 # ------------------- MAIN EXECUTION -------------------
 if __name__ == "__main__":
