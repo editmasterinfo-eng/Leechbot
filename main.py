@@ -1,4 +1,5 @@
 import os
+import sys
 import time
 import math
 import asyncio
@@ -10,40 +11,44 @@ from pyrogram.types import Message
 from config import api_id, api_hash, bot_token, auth_users, sudo_users
 from yt_dlp import YoutubeDL
 
+# ------------------- CRITICAL FIX FOR 'NoneType' object has no attribute 'write' -------------------
+# Ye code ka sabse important hissa hai. Ye fake output create karta hai taaki bot crash na ho.
+class DummyWriter:
+    def write(self, *args, **kwargs):
+        pass
+    def flush(self, *args, **kwargs):
+        pass
+
+# Agar system ka output None hai, to hum apna DummyWriter laga denge
+if sys.stdout is None:
+    sys.stdout = DummyWriter()
+if sys.stderr is None:
+    sys.stderr = DummyWriter()
+
 # ------------------- LOGGING SETUP -------------------
-# Basic logging setup to catch errors
 logging.basicConfig(
     level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[logging.StreamHandler(sys.stdout)] # Use patched stdout
 )
 logger = logging.getLogger(__name__)
 
-# ------------------- YT-DLP SILENT LOGGER (FIX FOR NoneType ERROR) -------------------
+# ------------------- YT-DLP SILENT LOGGER -------------------
 class MyLogger:
-    """
-    Ye dummy logger yt-dlp ke output ko rokega taaki
-    'NoneType object has no attribute write' error na aaye.
-    """
-    def debug(self, msg):
-        # Hum debug messages ignore kar rahe hain taaki console flood na ho
-        pass
+    def debug(self, msg): pass
+    def warning(self, msg): pass
+    def error(self, msg): print(f"YT-DLP Error: {msg}")
 
-    def warning(self, msg):
-        pass
-
-    def error(self, msg):
-        print(f"YT-DLP Error: {msg}")
-
-# ------------------- RENDER DEPLOYMENT FIX (FLASK SERVER) -------------------
+# ------------------- RENDER KEEP ALIVE (FLASK) -------------------
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is Running Successfully"
+    return "Bot is Alive & Running"
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
-    # use_reloader=False is important in threads
+    # Important: use_reloader=False threads ke sath conflicts rokta hai
     app.run(host='0.0.0.0', port=port, use_reloader=False)
 
 def keep_alive():
@@ -51,7 +56,7 @@ def keep_alive():
     t.daemon = True
     t.start()
 
-# ------------------- BOT CONFIGURATION -------------------
+# ------------------- BOT SETUP -------------------
 
 bot = Client(
     "bot",
@@ -60,11 +65,10 @@ bot = Client(
     bot_token=bot_token
 )
 
-# ------------------- HELPER FUNCTIONS FOR UI -------------------
+# ------------------- HELPER FUNCTIONS -------------------
 
 def humanbytes(size):
-    if not size:
-        return ""
+    if not size: return ""
     power = 2**10
     n = 0
     dic_powerN = {0: ' ', 1: 'Ki', 2: 'Mi', 3: 'Gi', 4: 'Ti'}
@@ -76,7 +80,7 @@ def humanbytes(size):
 def time_formatter(milliseconds: int) -> str:
     seconds, milliseconds = divmod(int(milliseconds), 1000)
     minutes, seconds = divmod(seconds, 60)
-    hours, minutes = divmod(hours, 60)
+    hours, minutes = divmod(minutes, 60)
     days, hours = divmod(hours, 24)
     return ((str(days) + "d, ") if days else "") + \
            ((str(hours) + "h, ") if hours else "") + \
@@ -104,21 +108,20 @@ async def progress_bar(current, total, message_obj, start_time, status_text):
               f"**🚀 Speed:** {humanbytes(speed)}/s\n" \
               f"**⏳ ETA:** {time_formatter(time_to_completion)}\n\n" \
               f"**{status_text}**"
-
         try:
             await message_obj.edit(text=tmp)
         except Exception:
             pass
 
-# ------------------- CORE LOGIC -------------------
+# ------------------- DOWNLOAD LOGIC -------------------
 
 async def process_video(client, m, url, is_bulk=False):
     status_msg = await m.reply_text(f"🔎 **Analyzing Link...**", quote=True)
     
     try:
-        # 1. Info Extraction
+        # --- 1. Info Extraction ---
         ydl_opts_info = {
-            'logger': MyLogger(), # Fix for NoneType error
+            'logger': MyLogger(), # Silent logger
             'quiet': True,
             'no_warnings': True,
             'nocheckcertificate': True,
@@ -133,9 +136,9 @@ async def process_video(client, m, url, is_bulk=False):
                 original_title = info_dict.get('title', 'Unknown_File')
                 ext = info_dict.get('ext', 'mp4')
                 
-                # Title clean kar rahe hain taaki file system error na de
+                # Sanitize filename to prevent errors
                 safe_title = "".join([c for c in original_title if c.isalnum() or c in (' ', '-', '_')]).strip()
-                if not safe_title: safe_title = "downloaded_file"
+                if not safe_title: safe_title = f"file_{int(time.time())}"
                 
                 final_filename = f"{safe_title} @skillneast.{ext}"
                 
@@ -143,18 +146,17 @@ async def process_video(client, m, url, is_bulk=False):
                 await status_msg.edit_text(f"❌ **Link Error:**\n`{str(e)}`")
                 return
 
-        # 2. Download
+        # --- 2. Download ---
         await status_msg.edit_text(f"⬇️ **Downloading:** `{safe_title}`")
         
         ydl_opts_down = {
             'outtmpl': final_filename,
-            'logger': MyLogger(), # Fix for NoneType error
-            'noprogress': True,     # Console par progress print mat karo (Fix)
+            'logger': MyLogger(), # IMPORTANT: Prevent console writing
+            'noprogress': True,     # IMPORTANT: No progress bar in console
             'quiet': True,
             'nocheckcertificate': True,
             'allow_unplayable_formats': True,
-            # Speed Optimization
-            'concurrent_fragment_downloads': 5,
+            'concurrent_fragment_downloads': 5, # Speed boost
             'buffersize': 1024,
         }
 
@@ -162,11 +164,10 @@ async def process_video(client, m, url, is_bulk=False):
             None, lambda: YoutubeDL(ydl_opts_down).download([url])
         )
 
-        # File Verification (yt-dlp ext change kar sakta hai)
+        # Check if file exists (Handling ext mismatch)
         if not os.path.exists(final_filename):
             found = False
             for file in os.listdir('.'):
-                # Check if file starts with safe_title
                 if file.startswith(safe_title):
                     final_filename = file
                     found = True
@@ -175,13 +176,12 @@ async def process_video(client, m, url, is_bulk=False):
                 await status_msg.edit_text("❌ Download Failed. File not found.")
                 return
 
-        # 3. Upload
+        # --- 3. Upload ---
         await status_msg.edit_text(f"⬆️ **Uploading...**")
         upload_start = time.time()
         
         caption_text = f"📂 **{final_filename}**\n\n👤 **User:** {m.from_user.mention}\n🤖 **Bot:** @skillneast"
 
-        # Decide: Video or Document
         video_extensions = ('.mp4', '.mkv', '.webm', '.avi', '.mov')
         
         if final_filename.lower().endswith(video_extensions):
@@ -200,7 +200,7 @@ async def process_video(client, m, url, is_bulk=False):
                 progress_args=(status_msg, upload_start, "⬆️ Uploading File...")
             )
 
-        # 4. Cleanup
+        # --- 4. Cleanup ---
         await status_msg.delete()
         if os.path.exists(final_filename):
             os.remove(final_filename)
@@ -213,22 +213,18 @@ async def process_video(client, m, url, is_bulk=False):
         if 'final_filename' in locals() and os.path.exists(final_filename):
             os.remove(final_filename)
 
-# ------------------- COMMAND HANDLERS -------------------
+# ------------------- COMMANDS -------------------
 
 @bot.on_message(filters.command(["start"]))
 async def start_command(bot, m: Message):
-    await m.reply_text(
-        f"👋 **Hi {m.from_user.first_name}!**\n\n"
-        "Send a link to download (Video, PDF, ZIP, Drive).\n"
-        "Errors Fixed & Render Ready! ✅"
-    )
+    await m.reply_text(f"👋 **Hi {m.from_user.first_name}!**\nSend any link.")
 
 @bot.on_message(filters.command(["bulk"]))
 async def bulk_download(bot, m: Message):
     user_id = m.from_user.id
     if user_id not in auth_users and user_id not in sudo_users:
         return
-
+    
     if len(m.command) > 1:
         raw_text = m.text.split(maxsplit=1)[1]
     elif m.reply_to_message and m.reply_to_message.text:
@@ -238,28 +234,25 @@ async def bulk_download(bot, m: Message):
         return
 
     links = [link.strip() for link in raw_text.replace(" ", "\n").split("\n") if link.strip().startswith("http")]
-    
     await m.reply_text(f"📦 **Queue:** {len(links)} Links")
 
     for link in links:
         await process_video(bot, m, link, is_bulk=True)
-    
-    await m.reply_text("✅ All Tasks Done!")
+    await m.reply_text("✅ Done!")
 
 @bot.on_message(filters.text)
 async def single_download(bot, m: Message):
     user_id = m.from_user.id
     if user_id not in auth_users and user_id not in sudo_users:
         return
-
     url = m.text.strip()
     if url.startswith(("http://", "https://")):
         await process_video(bot, m, url, is_bulk=False)
 
-# ------------------- RUN -------------------
+# ------------------- MAIN EXECUTION -------------------
 
 if __name__ == "__main__":
-    print("Starting Flask Server...")
+    print("Starting Flask Server (Dummy Writer Active)...")
     keep_alive()
     print("Starting Bot...")
     bot.run()
