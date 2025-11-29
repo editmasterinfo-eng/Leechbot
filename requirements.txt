@@ -12,5 +12,5 @@ humanize
 yt-dlp
 pyrogram
 tgcrypto
-yt-dlp
 flask
+gdown
