@@ -61,7 +61,6 @@ try:
     redis_url = os.environ.get("REDIS_URL")
     if redis_url:
         db = redis.from_url(redis_url, decode_responses=True)
-        # Ping the server to check the connection
         db.ping()
         logger.info("✅✅✅ Successfully connected to Redis database! ✅✅✅")
     else:
@@ -134,16 +133,16 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
                 name, ext = os.path.splitext(downloaded_file)
                 final_output_file = f"{name} @skillneast{ext}"
                 
-                # <<< FIX START >>>
-                # Purana command jo problem kar raha tha, use hata diya gaya hai.
-                # Ab hum 'concat' filter ka istemal kar rahe hain jo re-encode karke videos ko theek se jodta hai.
-                # Isse video streamable aur downloadable, dono format mein sahi chalegi.
+                # <<< FIX START: YAHAN PAR MAIN CHANGE KIYA GAYA HAI >>>
+                # Ye naya command pehle intro video [0:v] ko main video [1:v] ke reference se scale (resize) karega.
+                # Fir scaled intro video aur main video ko concatinate (jodega).
+                # Isse resolution mismatch ka error nahi aayega.
                 
                 ffmpeg_command = [
                     'ffmpeg',
                     '-i', temp_intro_path,
                     '-i', downloaded_file,
-                    '-filter_complex', '[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]',
+                    '-filter_complex', '[0:v][1:v]scale2ref[intro_scaled][main_ref];[intro_scaled][0:a][main_ref][1:a]concat=n=2:v=1:a=1[v][a]',
                     '-map', '[v]',
                     '-map', '[a]',
                     '-preset', 'veryfast', # Taaki merging jaldi ho
@@ -152,7 +151,6 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
                     final_output_file
                 ]
                 
-                # Ab 'concat_list.txt' ki zaroorat nahi hai.
                 # <<< FIX END >>>
 
                 process = await asyncio.create_subprocess_exec(
@@ -163,7 +161,6 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
                 _, stderr = await process.communicate()
                 
                 if process.returncode != 0:
-                    # Agar error aaye to use behtar tareeke se show karein
                     error_message = stderr.decode().strip()
                     logger.error(f"FFMPEG ERROR: {error_message}")
                     raise Exception(f"FFmpeg Error:\n`{error_message[-500:]}`") # Last 500 characters of error
@@ -192,7 +189,6 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
         caption = f"📂 **{base_name}**\n\n👤 **User:** {m.from_user.mention}\n🤖 **Bot:** @skillneast"
         progress_args = (status_msg, time.time(), "⬆️ Uploading...", task_info_text)
         
-        # Check if the file is a video before trying to upload as video
         if downloaded_file.lower().endswith(video_extensions):
             await m.reply_video(video=downloaded_file, caption=caption, supports_streaming=True, progress=progress_bar, progress_args=progress_args)
         else:
@@ -203,14 +199,12 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
             
     except Exception as e:
         await status_msg.edit_text(f"{task_info_text}❌ **Error:**\n`{str(e)}`")
-        raise e # Re-raise for bulk handler to catch
+        raise e
         
     finally:
-        # Cleanup all temporary files
         if downloaded_file and os.path.exists(downloaded_file): os.remove(downloaded_file)
         if final_output_file and os.path.exists(final_output_file) and final_output_file != downloaded_file: os.remove(final_output_file)
         if os.path.exists(temp_intro_path): os.remove(temp_intro_path)
-        # 'concat_list.txt' ab use hi nahi ho raha hai to use hatane ki zaroorat nahi.
 
 # --- Baaki saare handlers (/start, /help, /bulk, single_download) pehle jaise hi rahenge ---
 @bot.on_message(filters.command(["start"]))
