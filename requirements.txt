@@ -14,3 +14,4 @@ pyrogram
 tgcrypto
 flask
 gdown
+redis
