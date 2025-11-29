@@ -18,7 +18,6 @@ from yt_dlp import YoutubeDL
 import gdown
 
 # --- Boilerplate code (Logging, Flask, Helpers) ---
-# ... (Yahan saara boilerplate code hai jo pehle tha, use chhod raha hoon) ...
 class DummyWriter:
     def write(self, *args, **kwargs): pass
     def flush(self, *args, **kwargs): pass
@@ -131,23 +130,53 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
                 if not os.path.exists(temp_intro_path):
                     raise Exception("Intro video link se download nahi ho payi.")
                 
-                await status_msg.edit_text(f"{task_info_text}🖇️ Merging videos...")
+                await status_msg.edit_text(f"{task_info_text}🖇️ Merging videos... (This may take a moment)")
                 name, ext = os.path.splitext(downloaded_file)
                 final_output_file = f"{name} @skillneast{ext}"
-                with open("concat_list.txt", "w", encoding="utf-8") as f:
-                    f.write(f"file '{os.path.abspath(temp_intro_path)}'\n")
-                    f.write(f"file '{os.path.abspath(downloaded_file)}'\n")
                 
-                ffmpeg_command = ['ffmpeg', '-f', 'concat', '-safe', '0', '-i', 'concat_list.txt', '-c', 'copy', final_output_file]
-                process = await asyncio.create_subprocess_exec(*ffmpeg_command, stderr=asyncio.subprocess.PIPE)
+                # <<< FIX START >>>
+                # Purana command jo problem kar raha tha, use hata diya gaya hai.
+                # Ab hum 'concat' filter ka istemal kar rahe hain jo re-encode karke videos ko theek se jodta hai.
+                # Isse video streamable aur downloadable, dono format mein sahi chalegi.
+                
+                ffmpeg_command = [
+                    'ffmpeg',
+                    '-i', temp_intro_path,
+                    '-i', downloaded_file,
+                    '-filter_complex', '[0:v][0:a][1:v][1:a]concat=n=2:v=1:a=1[v][a]',
+                    '-map', '[v]',
+                    '-map', '[a]',
+                    '-preset', 'veryfast', # Taaki merging jaldi ho
+                    '-c:v', 'libx264',    # Standard video codec
+                    '-c:a', 'aac',        # Standard audio codec
+                    final_output_file
+                ]
+                
+                # Ab 'concat_list.txt' ki zaroorat nahi hai.
+                # <<< FIX END >>>
+
+                process = await asyncio.create_subprocess_exec(
+                    *ffmpeg_command, 
+                    stdout=asyncio.subprocess.PIPE, 
+                    stderr=asyncio.subprocess.PIPE
+                )
                 _, stderr = await process.communicate()
-                if process.returncode != 0: raise Exception(f"FFmpeg Error: {stderr.decode().strip()}")
-                os.remove(downloaded_file); downloaded_file = final_output_file
+                
+                if process.returncode != 0:
+                    # Agar error aaye to use behtar tareeke se show karein
+                    error_message = stderr.decode().strip()
+                    logger.error(f"FFMPEG ERROR: {error_message}")
+                    raise Exception(f"FFmpeg Error:\n`{error_message[-500:]}`") # Last 500 characters of error
+                    
+                os.remove(downloaded_file)
+                downloaded_file = final_output_file
             else:
-                name, ext = os.path.splitext(downloaded_file); final_filename = f"{name} @skillneast{ext}"
-                os.rename(downloaded_file, final_filename); downloaded_file = final_filename
+                name, ext = os.path.splitext(downloaded_file)
+                final_filename = f"{name} @skillneast{ext}"
+                os.rename(downloaded_file, final_filename)
+                downloaded_file = final_filename
         else:
-            # ... (baaki links ka logic pehle jaisa hi)
+            # Baaki links ka logic pehle jaisa hi
             ydl_opts_info = {'logger': MyLogger(), 'quiet': True, 'no_warnings': True}
             with YoutubeDL(ydl_opts_info) as ydl:
                 info = await asyncio.get_event_loop().run_in_executor(None, lambda: ydl.extract_info(url, download=False))
@@ -162,21 +191,28 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
         await status_msg.edit_text(f"{task_info_text}⬆️ Uploading: `{base_name}`")
         caption = f"📂 **{base_name}**\n\n👤 **User:** {m.from_user.mention}\n🤖 **Bot:** @skillneast"
         progress_args = (status_msg, time.time(), "⬆️ Uploading...", task_info_text)
+        
+        # Check if the file is a video before trying to upload as video
         if downloaded_file.lower().endswith(video_extensions):
             await m.reply_video(video=downloaded_file, caption=caption, supports_streaming=True, progress=progress_bar, progress_args=progress_args)
         else:
             await m.reply_document(document=downloaded_file, caption=caption, progress=progress_bar, progress_args=progress_args)
-        if not task_info_text: await status_msg.delete()
+        
+        if not task_info_text: 
+            await status_msg.delete()
+            
     except Exception as e:
-        await status_msg.edit_text(f"{task_info_text}❌ **Error:**\n`{str(e)}`"); raise e
+        await status_msg.edit_text(f"{task_info_text}❌ **Error:**\n`{str(e)}`")
+        raise e # Re-raise for bulk handler to catch
+        
     finally:
+        # Cleanup all temporary files
         if downloaded_file and os.path.exists(downloaded_file): os.remove(downloaded_file)
-        if final_output_file and os.path.exists(final_output_file): os.remove(final_output_file)
+        if final_output_file and os.path.exists(final_output_file) and final_output_file != downloaded_file: os.remove(final_output_file)
         if os.path.exists(temp_intro_path): os.remove(temp_intro_path)
-        if os.path.exists("concat_list.txt"): os.remove("concat_list.txt")
+        # 'concat_list.txt' ab use hi nahi ho raha hai to use hatane ki zaroorat nahi.
 
 # --- Baaki saare handlers (/start, /help, /bulk, single_download) pehle jaise hi rahenge ---
-# ... (unka code yahan paste karein) ...
 @bot.on_message(filters.command(["start"]))
 async def start_command(bot: Client, m: Message):
     await m.reply_text(f"👋 **Hi {m.from_user.first_name}!**\n/help for more info.", quote=True)
