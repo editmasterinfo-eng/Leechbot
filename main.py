@@ -3,23 +3,48 @@ import time
 import math
 import asyncio
 import threading
+import logging
 from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message
 from config import api_id, api_hash, bot_token, auth_users, sudo_users
 from yt_dlp import YoutubeDL
 
+# ------------------- LOGGING SETUP -------------------
+# Basic logging setup to catch errors
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger(__name__)
+
+# ------------------- YT-DLP SILENT LOGGER (FIX FOR NoneType ERROR) -------------------
+class MyLogger:
+    """
+    Ye dummy logger yt-dlp ke output ko rokega taaki
+    'NoneType object has no attribute write' error na aaye.
+    """
+    def debug(self, msg):
+        # Hum debug messages ignore kar rahe hain taaki console flood na ho
+        pass
+
+    def warning(self, msg):
+        pass
+
+    def error(self, msg):
+        print(f"YT-DLP Error: {msg}")
+
 # ------------------- RENDER DEPLOYMENT FIX (FLASK SERVER) -------------------
 app = Flask(__name__)
 
 @app.route('/')
 def home():
-    return "Bot is Running"
+    return "Bot is Running Successfully"
 
 def run_web_server():
-    # Render PORT env variable use karega, default 8080
     port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port)
+    # use_reloader=False is important in threads
+    app.run(host='0.0.0.0', port=port, use_reloader=False)
 
 def keep_alive():
     t = threading.Thread(target=run_web_server)
@@ -38,7 +63,6 @@ bot = Client(
 # ------------------- HELPER FUNCTIONS FOR UI -------------------
 
 def humanbytes(size):
-    """Bytes ko readable format mein convert karta hai"""
     if not size:
         return ""
     power = 2**10
@@ -61,7 +85,6 @@ def time_formatter(milliseconds: int) -> str:
            ((str(milliseconds) + "ms, ") if milliseconds else "")
 
 async def progress_bar(current, total, message_obj, start_time, status_text):
-    """Upload/Download Progress Bar"""
     now = time.time()
     diff = now - start_time
     
@@ -70,8 +93,7 @@ async def progress_bar(current, total, message_obj, start_time, status_text):
         speed = current / diff
         elapsed_time = round(diff) * 1000
         time_to_completion = round((total - current) / speed) * 1000 if speed > 0 else 0
-        estimated_total_time = elapsed_time + time_to_completion
-
+        
         progress_str = "[{0}{1}] \n**📊 Progress:** {2}%\n".format(
             ''.join(["■" for i in range(math.floor(percentage / 5))]),
             ''.join(["□" for i in range(20 - math.floor(percentage / 5))]),
@@ -88,39 +110,19 @@ async def progress_bar(current, total, message_obj, start_time, status_text):
         except Exception:
             pass
 
-# ------------------- DOWNLOAD HOOK FOR YT-DLP -------------------
-# Ye trick use ki hai taaki yt-dlp ka progress Telegram pe show ho
-
-class DownloadStatus:
-    def __init__(self):
-        self.message = None
-        self.start_time = time.time()
-        self.last_update = 0
-
-def my_hook(d):
-    if d['status'] == 'downloading':
-        try:
-            # Global variable ya context use karna mushkil hai hook me, 
-            # isliye hum sirf print/log kar rahe hain yahan.
-            # Real-time telegram update thread-blocking issue kar sakta hai.
-            pass 
-        except Exception:
-            pass
-
 # ------------------- CORE LOGIC -------------------
 
 async def process_video(client, m, url, is_bulk=False):
-    status_msg = await m.reply_text(f"🔎 **Analyzing Link:** `{url}`", quote=True)
-    start_time = time.time()
-
+    status_msg = await m.reply_text(f"🔎 **Analyzing Link...**", quote=True)
+    
     try:
-        # 1. Get Info & Prepare Filename
-        # GDrive aur generic files ke liye generic extractor allow kiya
+        # 1. Info Extraction
         ydl_opts_info = {
+            'logger': MyLogger(), # Fix for NoneType error
             'quiet': True,
             'no_warnings': True,
             'nocheckcertificate': True,
-            'allow_unplayable_formats': True, # PDF/ZIP ke liye important
+            'allow_unplayable_formats': True,
         }
 
         with YoutubeDL(ydl_opts_info) as ydl:
@@ -129,63 +131,70 @@ async def process_video(client, m, url, is_bulk=False):
                     None, lambda: ydl.extract_info(url, download=False)
                 )
                 original_title = info_dict.get('title', 'Unknown_File')
-                ext = info_dict.get('ext', 'mp4') # Default ext detection
-                final_title = f"{original_title} @skillneast.{ext}"
+                ext = info_dict.get('ext', 'mp4')
+                
+                # Title clean kar rahe hain taaki file system error na de
+                safe_title = "".join([c for c in original_title if c.isalnum() or c in (' ', '-', '_')]).strip()
+                if not safe_title: safe_title = "downloaded_file"
+                
+                final_filename = f"{safe_title} @skillneast.{ext}"
+                
             except Exception as e:
                 await status_msg.edit_text(f"❌ **Link Error:**\n`{str(e)}`")
                 return
 
-        # 2. Download Content
-        await status_msg.edit_text(f"⬇️ **Downloading:** `{original_title}`\n⚡ Speed Boost Active...")
+        # 2. Download
+        await status_msg.edit_text(f"⬇️ **Downloading:** `{safe_title}`")
         
-        # High Speed Settings
         ydl_opts_down = {
-            'outtmpl': final_title,
+            'outtmpl': final_filename,
+            'logger': MyLogger(), # Fix for NoneType error
+            'noprogress': True,     # Console par progress print mat karo (Fix)
             'quiet': True,
             'nocheckcertificate': True,
             'allow_unplayable_formats': True,
-            # Speed Optimization Flags
-            'concurrent_fragment_downloads': 5, # Parallel parts download
+            # Speed Optimization
+            'concurrent_fragment_downloads': 5,
             'buffersize': 1024,
-            'http_chunk_size': 10485760, 
         }
 
         await asyncio.get_event_loop().run_in_executor(
             None, lambda: YoutubeDL(ydl_opts_down).download([url])
         )
 
-        # File Verification
-        if not os.path.exists(final_title):
-            # Fallback check agar yt-dlp ne extension change kar di
+        # File Verification (yt-dlp ext change kar sakta hai)
+        if not os.path.exists(final_filename):
             found = False
             for file in os.listdir('.'):
-                if file.startswith(original_title):
-                    final_title = file
+                # Check if file starts with safe_title
+                if file.startswith(safe_title):
+                    final_filename = file
                     found = True
                     break
             if not found:
                 await status_msg.edit_text("❌ Download Failed. File not found.")
                 return
 
-        # 3. Upload File (Document or Video based on extension)
+        # 3. Upload
         await status_msg.edit_text(f"⬆️ **Uploading...**")
         upload_start = time.time()
         
-        caption_text = f"📂 **{final_title}**\n\n👤 **User:** {m.from_user.mention}\n🤖 **Bot:** @skillneast"
+        caption_text = f"📂 **{final_filename}**\n\n👤 **User:** {m.from_user.mention}\n🤖 **Bot:** @skillneast"
 
-        # Check file type for upload method
-        if final_title.lower().endswith(('.mp4', '.mkv', '.webm', '.avi')):
+        # Decide: Video or Document
+        video_extensions = ('.mp4', '.mkv', '.webm', '.avi', '.mov')
+        
+        if final_filename.lower().endswith(video_extensions):
             await m.reply_video(
-                video=final_title,
+                video=final_filename,
                 caption=caption_text,
                 supports_streaming=True,
                 progress=progress_bar,
                 progress_args=(status_msg, upload_start, "⬆️ Uploading Video...")
             )
         else:
-            # PDF, ZIP, etc ke liye document
             await m.reply_document(
-                document=final_title,
+                document=final_filename,
                 caption=caption_text,
                 progress=progress_bar,
                 progress_args=(status_msg, upload_start, "⬆️ Uploading File...")
@@ -193,16 +202,16 @@ async def process_video(client, m, url, is_bulk=False):
 
         # 4. Cleanup
         await status_msg.delete()
-        if os.path.exists(final_title):
-            os.remove(final_title)
+        if os.path.exists(final_filename):
+            os.remove(final_filename)
         
         if is_bulk:
             await asyncio.sleep(2)
 
     except Exception as e:
         await status_msg.edit_text(f"❌ **Error:** `{str(e)}`")
-        if 'final_title' in locals() and os.path.exists(final_title):
-            os.remove(final_title)
+        if 'final_filename' in locals() and os.path.exists(final_filename):
+            os.remove(final_filename)
 
 # ------------------- COMMAND HANDLERS -------------------
 
@@ -210,8 +219,8 @@ async def process_video(client, m, url, is_bulk=False):
 async def start_command(bot, m: Message):
     await m.reply_text(
         f"👋 **Hi {m.from_user.first_name}!**\n\n"
-        "Send any link (YouTube, Drive, PDF, ZIP).\n"
-        "Render Port Error Fixed! ✅"
+        "Send a link to download (Video, PDF, ZIP, Drive).\n"
+        "Errors Fixed & Render Ready! ✅"
     )
 
 @bot.on_message(filters.command(["bulk"]))
@@ -247,10 +256,10 @@ async def single_download(bot, m: Message):
     if url.startswith(("http://", "https://")):
         await process_video(bot, m, url, is_bulk=False)
 
-# ------------------- START BOT -------------------
+# ------------------- RUN -------------------
 
-print("Starting Web Server for Render...")
-keep_alive()  # <--- Ye function Render ko khush rakhega
-
-print("Bot Started Successfully...")
-bot.run()
+if __name__ == "__main__":
+    print("Starting Flask Server...")
+    keep_alive()
+    print("Starting Bot...")
+    bot.run()
