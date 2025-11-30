@@ -168,8 +168,29 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
                 stop_event = asyncio.Event()
                 animation_task = asyncio.create_task(animate_status(status_msg, f"{task_info_text}🖇️ Attaching photo...", stop_event))
 
-                # Ye command image se 5 sec ka video banata hai aur audio ko copy kar leta hai
-                ffmpeg_command = ['ffmpeg', '-y', '-loop', '1', '-t', '5', '-i', f"{temp_intro_path}.jpg", '-i', downloaded_file, '-filter_complex', "[0:v]pix_fmt=yuv420p,scale='iw*min(1920/iw,1080/ih)':'ih*min(1920/iw,1080/ih)',pad=1920:1080:(1920-iw)/2:(1080-ih)/2,setsar=1[v0];[v0][1:v]concat=n=2:v=1[v]", '-map', '[v]', '-map', '1:a?', '-c:a', 'copy', '-preset', 'ultrafast', '-shortest', final_output_file]
+                # [FIXED COMMAND] 
+                # Step 1: Image se 5-sec ka intro video banata hai (standard resolution/format me).
+                # Step 2: Main video ko bhi same standard resolution/format me laata hai.
+                # Step 3: Dono standard videos ko jodta hai (concat) aur main video ki audio copy karta hai.
+                ffmpeg_command = [
+                    'ffmpeg', '-y',
+                    '-loop', '1', '-t', '5', '-i', f"{temp_intro_path}.jpg",  # Input 1: Image
+                    '-i', downloaded_file,  # Input 2: Main Video
+                    '-filter_complex',
+                    # Process image: scale, pad to 1920x1080, set format, set aspect ratio -> [v_intro]
+                    "[0:v]scale=w=1920:h=1080:force_original_aspect_ratio=decrease,pad=w=1920:h=1080:x=(ow-iw)/2:y=(oh-ih)/2,format=yuv420p,setsar=1[v_intro];" +
+                    # Process main video: scale to 1920x1080, set format, set aspect ratio -> [v_main]
+                    "[1:v]scale=w=1920:h=1080,format=yuv420p,setsar=1[v_main];" +
+                    # Concat intro video and main video, but take audio only from main video
+                    "[v_intro][v_main]concat=n=2:v=1:a=0[v_out]",
+                    '-map', '[v_out]',     # Map the concatenated video stream
+                    '-map', '1:a?',         # Map the audio from the second input (main video), '?' makes it optional
+                    '-c:v', 'libx264',      # Video codec
+                    '-c:a', 'copy',         # Copy audio without re-encoding
+                    '-preset', 'ultrafast', # For faster processing
+                    '-shortest',            # Finish encoding when the shortest stream ends (the audio)
+                    final_output_file
+                ]
 
                 process = await asyncio.create_subprocess_exec(*ffmpeg_command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE)
                 _, stderr = await process.communicate()
