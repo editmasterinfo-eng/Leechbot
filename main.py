@@ -1,5 +1,17 @@
 import os
 import sys
+
+# --- PATCH FOR OLD LIBRARIES (MEGA.PY FIX) ---
+# Ye code mega.py ke purane errors ko fix karega
+import collections.abc
+if not hasattr(collections, 'Iterable'):
+    collections.Iterable = collections.abc.Iterable
+if not hasattr(collections, 'Mapping'):
+    collections.Mapping = collections.abc.Mapping
+if not hasattr(collections, 'MutableMapping'):
+    collections.MutableMapping = collections.abc.MutableMapping
+# ---------------------------------------------
+
 import time
 import math
 import asyncio
@@ -8,7 +20,7 @@ import logging
 import re
 import gdown
 import psutil
-from mega import Mega  # Mega Library
+from mega import Mega  # Ab ye bina error ke import hoga
 from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message
@@ -78,7 +90,7 @@ async def edit_status(message, text):
     try: await message.edit_text(f"{text}\n\n{get_system_stats()}")
     except MessageNotModified: pass
 
-# --- UI COMMANDS ---
+# --- HANDLERS ---
 @bot.on_message(filters.command(["start"]))
 async def start_command(bot: Client, m: Message):
     await m.reply_text("👋 Hello! Send me a Mega, Drive, or YouTube link.", quote=True)
@@ -91,69 +103,44 @@ async def cancel_tasks_command(bot: Client, m: Message):
         await m.reply_text("✅ Tasks Cancelled.")
     else: await m.reply_text("🤷‍♂️ No active tasks.")
 
-# --- MAIN LOGIC ---
+# --- PROCESS LOGIC ---
 async def process_link(client: Client, m: Message, url: str, status_msg: Message):
     downloaded_file = None
     try:
         video_extensions = ('.mp4', '.mkv', '.webm', '.avi', '.mov')
 
-        # --- GOOGLE DRIVE ---
         if "drive.google.com" in url:
             await edit_status(status_msg, "📥 Downloading from Drive...")
             downloaded_file = await asyncio.get_event_loop().run_in_executor(None, lambda: gdown.download(url, fuzzy=True, quiet=True))
             if not downloaded_file: raise Exception("Drive Link Failed.")
             
-        # --- MEGA.NZ (FIXED LOGIC) ---
         elif "mega.nz" in url:
             await edit_status(status_msg, "📥 Downloading from Mega...")
             mega = Mega()
-            m_mega = mega.login() 
+            m_mega = mega.login()
             
-            # Case 1: Complex Link (Folder ke andar File)
-            # URL format: https://mega.nz/folder/ID#KEY/file/FILE_ID
+            # --- MEGA LOGIC FIX (Folder/File) ---
             if "/folder/" in url and "/file/" in url:
                 try:
                     folder_url = url.split("/file/")[0]
                     target_file_id = url.split("/file/")[1]
-                    
-                    # Folder scan karke file dhoondhein
                     files = m_mega.get_public_url_info(folder_url)
                     target_node = None
-                    
-                    # Mega result kabhi dict kabhi list hota hai, handle karein
-                    if isinstance(files, dict):
-                        # Agar dict hai toh values check karein
-                        node_list = files.values()
-                    else:
-                        node_list = files
-
+                    node_list = files.values() if isinstance(files, dict) else files
                     for node in node_list:
-                        # 'h' is the handle (ID)
                         if isinstance(node, dict) and node.get('h') == target_file_id:
                             target_node = node
                             break
-                    
                     if target_node:
-                        # Node mil gaya, ab download karein
-                        downloaded_file = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: m_mega.download(target_node)
-                        )
-                    else:
-                        raise Exception("Folder me wo File nahi mili.")
-                except Exception as e:
-                    raise Exception(f"Mega Folder-File Error: {e}")
-
-            # Case 2: Standard Link
+                        downloaded_file = await asyncio.get_event_loop().run_in_executor(None, lambda: m_mega.download(target_node))
+                    else: raise Exception("File not found in folder.")
+                except Exception as e: raise Exception(f"Mega Logic Error: {e}")
             else:
                 try:
-                    downloaded_file = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: m_mega.download_url(url)
-                    )
-                except Exception as e:
-                    raise Exception(f"Mega Error: {str(e)}")
+                    downloaded_file = await asyncio.get_event_loop().run_in_executor(None, lambda: m_mega.download_url(url))
+                except Exception as e: raise Exception(f"Mega Download Error: {e}")
 
-        # --- YOUTUBE-DL ---
-        else:
+        else: # YT-DLP
             await edit_status(status_msg, "🔎 Analyzing...")
             ydl_opts = {'outtmpl': '%(title)s @skillneast.%(ext)s', 'quiet': True}
             with YoutubeDL(ydl_opts) as ydl:
@@ -164,7 +151,6 @@ async def process_link(client: Client, m: Message, url: str, status_msg: Message
             raise Exception("Download Failed (File not found).")
 
         # --- RENAME & UPLOAD ---
-        # Branding Rename
         if "@skillneast" not in downloaded_file:
             name, ext = os.path.splitext(downloaded_file)
             new_name = f"{name} @skillneast{ext}"
