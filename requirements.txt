@@ -17,3 +17,12 @@ gdown
 redis
 psutil
 mega.py
+flask
+pyrogram
+tgcrypto
+yt-dlp
+gdown
+psutil
+tenacity==8.2.3
+mega.py
+pycryptodome
