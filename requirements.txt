@@ -5,5 +5,5 @@ yt-dlp
 gdown
 psutil
 tenacity==8.2.3
-mega.py
 pycryptodome
+git+https://github.com/odota/mega.py.git
