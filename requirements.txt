@@ -16,3 +16,4 @@ flask
 gdown
 redis
 psutil
+mega.py
