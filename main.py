@@ -1,18 +1,5 @@
 import os
 import sys
-
-# -------------------------------------------------------------------------
-# PATCH FOR PYTHON 3.10+ (CRITICAL FOR MEGA LIBRARY)
-# Is part ko mat hatana, warna "AttributeError: module 'collections' has no attribute 'Iterable'" aayega.
-import collections.abc
-if not hasattr(collections, 'Iterable'):
-    collections.Iterable = collections.abc.Iterable
-if not hasattr(collections, 'Mapping'):
-    collections.Mapping = collections.abc.Mapping
-if not hasattr(collections, 'MutableMapping'):
-    collections.MutableMapping = collections.abc.MutableMapping
-# -------------------------------------------------------------------------
-
 import time
 import math
 import asyncio
@@ -20,8 +7,7 @@ import threading
 import logging
 import re
 import gdown
-import psutil
-from mega import Mega  # Mega Library
+import psutil  # System monitoring library
 from flask import Flask
 from pyrogram import Client, filters
 from pyrogram.types import Message
@@ -29,82 +15,71 @@ from pyrogram.errors import MessageNotModified
 from config import api_id, api_hash, bot_token, auth_users, sudo_users
 from yt_dlp import YoutubeDL
 
-# --- Global Variables ---
+# --- Global Variables for Concurrency and Cancellation ---
 CONCURRENCY_LIMIT = 3
 semaphore = asyncio.Semaphore(CONCURRENCY_LIMIT)
-ACTIVE_TASKS = {}  # Store tasks for cancellation
-ANIMATION_FRAMES = ["⢿", "⣻", "⣽", "⣾", "⣷", "⣯", "⣟", "⡿"]
+ACTIVE_TASKS = {}  # To store and manage active tasks for cancellation {user_id: {msg_id: task}}
+ANIMATION_FRAMES = ["â¢¿", "â£»", "â£½", "â£¾", "â£·", "â£¯", "â£Ÿ", "â¡¿"]
 animation_index = 0
 
-# --- Logging & Web Server (Keep Alive) ---
+# --- Boilerplate code (Logging, Flask, Helpers) ---
 class DummyWriter:
     def write(self, *args, **kwargs): pass
     def flush(self, *args, **kwargs): pass
 if sys.stdout is None: sys.stdout = DummyWriter()
 if sys.stderr is None: sys.stderr = DummyWriter()
-
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", handlers=[logging.StreamHandler(sys.stdout)])
 logger = logging.getLogger(__name__)
-
 class MyLogger:
     def debug(self, msg): pass
     def warning(self, msg): pass
     def error(self, msg): print(f"YT-DLP Error: {msg}")
-
 app = Flask(__name__)
 @app.route('/')
 def home(): return "Bot is Alive & Running"
-
 def run_web_server():
-    port = int(os.environ.get("PORT", 8080))
-    app.run(host='0.0.0.0', port=port, use_reloader=False)
-
+    port = int(os.environ.get("PORT", 8080)); app.run(host='0.0.0.0', port=port, use_reloader=False)
 def keep_alive():
-    t = threading.Thread(target=run_web_server)
-    t.daemon = True
-    t.start()
-
+    t = threading.Thread(target=run_web_server); t.daemon = True; t.start()
 bot = Client("bot", api_id=api_id, api_hash=api_hash, bot_token=bot_token)
-
-# --- Helper Functions ---
 def humanbytes(size):
     if not size: return "0 B"
     power=1024; n=0; dic_powerN={0:'B', 1:'KiB', 2:'MiB', 3:'GiB', 4:'TiB'}
     while size>power: size/=power; n+=1
     return f"{round(size, 2)} {dic_powerN[n]}"
-
 def time_formatter(milliseconds: int) -> str:
-    s, ms = divmod(int(milliseconds), 1000)
-    m, s = divmod(s, 60)
-    h, m = divmod(m, 60)
-    d, h = divmod(h, 24)
+    s, ms = divmod(int(milliseconds), 1000); m, s = divmod(s, 60); h, m = divmod(m, 60); d, h = divmod(h, 24)
     return ((f"{d}d, " if d else "") + (f"{h}h, " if h else "") + (f"{m}m, " if m else "") + (f"{s}s, " if s else "")).strip(', ') or "0s"
 
 def get_system_stats():
+    """Returns a formatted string of system stats."""
     cpu_usage = psutil.cpu_percent()
     ram_usage = psutil.virtual_memory().percent
-    return f"**🖥️ CPU:** {cpu_usage}% | **🧠 RAM:** {ram_usage}%"
+    stats = f"**ðŸ–¥ï¸ CPU:** {cpu_usage}% | **ðŸ§  RAM:** {ram_usage}%"
+    try:
+        # Note: Temperature may not be available on all systems/platforms (like Render/Heroku)
+        temps = psutil.sensors_temperatures()
+        if temps and 'coretemp' in temps:
+            core_temps = [temp.current for temp in temps['coretemp']]
+            avg_temp = sum(core_temps) / len(core_temps)
+            stats += f" | **ðŸŒ¡ï¸ Temp:** {avg_temp:.1f}Â°C"
+    except (AttributeError, KeyError):
+        pass # Silently ignore if temp sensors are not found
+    return stats
 
 async def progress_bar(current, total, message_obj, start_time, status_text):
     global animation_index
-    now=time.time()
-    diff=now-start_time
-    
+    now=time.time(); diff=now-start_time
     if round(diff % 4.00)==0 or current==total:
-        p=current*100/total
-        s=current/diff if diff > 0 else 0
-        eta=round((total-current)/s)*1000 if s>0 else 0
+        p=current*100/total; s=current/diff if diff > 0 else 0; eta=round((total-current)/s)*1000 if s>0 else 0
         
         loader = ANIMATION_FRAMES[animation_index % len(ANIMATION_FRAMES)]
         animation_index += 1
-        
-        filled_blocks = math.floor(p/5)
-        empty_blocks = 20 - filled_blocks
-        prog = "[{0}{1}]".format('■' * filled_blocks, '□' * empty_blocks)
-        
-        tmp = (f"{prog} {round(p,2)}%\n"
-               f"**📦 Done:** {humanbytes(current)}/{humanbytes(total)}\n"
-               f"**🚀 Speed:** {humanbytes(s)}/s | **⏳ ETA:** {time_formatter(eta)}\n\n"
+
+        prog = "[{0}{1}] \n**ðŸ“Š Progress:** {2}%\n".format(''.join(["â– " for i in range(math.floor(p/5))]), ''.join(["â–¡" for i in range(20-math.floor(p/5))]), round(p,2))
+        tmp = (f"{prog}**ðŸ“¦ Done:** {humanbytes(current)}/{humanbytes(total)}\n"
+               f"**ðŸš€ Speed:** {humanbytes(s)}/s\n"
+               f"**â³ ETA:** {time_formatter(eta)}\n\n"
                f"{get_system_stats()}\n\n"
                f"**{status_text}** {loader}")
         try:
@@ -112,165 +87,152 @@ async def progress_bar(current, total, message_obj, start_time, status_text):
         except MessageNotModified:
             pass
         except Exception as e:
-            logger.error(f"Progress bar error: {e}")
+            logger.error(f"Progress bar update error: {e}")
 
 async def edit_status(message, text):
+    """Edits a message with a live loader and stats."""
+    global animation_index
+    loader = ANIMATION_FRAMES[animation_index % len(ANIMATION_FRAMES)]
+    animation_index += 1
     try:
-        await message.edit_text(f"{text}\n\n{get_system_stats()}")
+        await message.edit_text(f"{text} {loader}\n\n{get_system_stats()}")
     except MessageNotModified:
         pass
 
-# --- UI & Control Handlers ---
+# --- UI/UX & CONTROL COMMANDS ---
 @bot.on_message(filters.command(["start"]))
 async def start_command(bot: Client, m: Message):
-    txt = (f"👋 **Hello {m.from_user.first_name}!**\n\n"
-           "I can download files from:\n"
-           "🔹 **Mega.nz** (Files & Folders)\n"
-           "🔹 **Google Drive**\n"
-           "🔹 **YouTube/Direct Links**\n\n"
-           "Commands:\n"
-           "📦 `/bulk <links>`\n"
-           "❌ `/cancel`\n"
-           "Just send me a link to start!")
-    await m.reply_text(txt, quote=True)
+    welcome_text = f"""
+ðŸ‘‹ **Hello, {m.from_user.first_name}!**
+
+Mein ek file downloader bot hoon. Aap mujhe direct download links (jaise Google Drive) ya YouTube video links de sakte hain, aur main unhe download karke aapko bhej dunga.
+
+**Khaas Features:**
+ðŸ”¹ **Google Drive & YouTube-DL Support.**
+ðŸ”¹ **Bulk Downloader:** `/bulk` se ek saath kai links download karein.
+ðŸ”¹ **Live Status:** Har download me live speed, progress aur system usage dekhein.
+ðŸ”¹ **Cancellation:** `/cancel` command se kisi bhi download ko rokein.
+
+Shuru karne ke liye, mujhe koi link bhejein ya `/help` command ka istemal karein.
+"""
+    welcome_image = "https://i.imgur.com/v1L4y2g.jpeg"
+    await m.reply_photo(photo=welcome_image, caption=welcome_text, quote=True)
 
 @bot.on_message(filters.command(["help"]))
 async def help_command(bot: Client, m: Message):
-    await m.reply_text("Help: Send any link to download. Use /bulk for multiple links.", quote=True)
+    help_text = """
+ðŸ“œ **Bot Help Section**
+
+Yahan bot ke sabhi commands ki jaankari hai:
+
+ðŸš€ **/start**
+- Bot ko start karein aur welcome message dekhein.
+
+ðŸ¤ **/help**
+- Is help message ko dekhein.
+
+ðŸ“¦ **/bulk** ` <link1> <link2> ...`
+- Ek saath kai links download karein.
+
+âŒ **/cancel**
+- Aapke shuru kiye gaye sabhi downloads ko cancel kar dega.
+- Agar aap kisi download status message ko reply karke is command ko bhejenge, to sirf wahi download cancel hoga.
+
+ðŸ”— **Direct Link Download**
+- Bot ko koi bhi link bhejein, aur woh use download kar dega.
+"""
+    await m.reply_text(help_text, quote=True)
 
 @bot.on_message(filters.command(["cancel"]))
 async def cancel_tasks_command(bot: Client, m: Message):
     user_id = m.from_user.id
+    
+    # Specific task cancellation
+    if m.reply_to_message:
+        msg_id_to_cancel = m.reply_to_message.id
+        if user_id in ACTIVE_TASKS and msg_id_to_cancel in ACTIVE_TASKS[user_id]:
+            task_to_cancel = ACTIVE_TASKS[user_id][msg_id_to_cancel]
+            task_to_cancel.cancel()
+            await m.reply_text(f"âœ… Task `{msg_id_to_cancel}` ko cancel karne ka request bhej diya gaya hai.")
+        else:
+            await m.reply_text("âŒ Is message se juda koi active task nahi mila.")
+        return
+
+    # Global cancellation for the user
     if user_id in ACTIVE_TASKS and ACTIVE_TASKS[user_id]:
         count = 0
         for task in ACTIVE_TASKS[user_id].values():
             task.cancel()
             count += 1
-        await m.reply_text(f"✅ Cancelled {count} active tasks.")
+        await m.reply_text(f"âœ… Aapke sabhi `{count}` active tasks ko cancel karne ka request bhej diya gaya hai.")
     else:
-        await m.reply_text("🤷‍♂️ No active tasks found.")
+        await m.reply_text("ðŸ¤·â€â™‚ï¸ Aapka koi bhi task active nahi hai.")
 
-# --- CORE DOWNLOAD LOGIC ---
+# --- MAIN LOGIC ---
 async def process_link(client: Client, m: Message, url: str, status_msg: Message):
     downloaded_file = None
     try:
         video_extensions = ('.mp4', '.mkv', '.webm', '.avi', '.mov')
 
-        # --- GOOGLE DRIVE ---
         if "drive.google.com" in url:
-            await edit_status(status_msg, "📥 Downloading from Google Drive...")
+            await edit_status(status_msg, "ðŸ“¥ Downloading from Google Drive...")
             downloaded_file = await asyncio.get_event_loop().run_in_executor(None, lambda: gdown.download(url, fuzzy=True, quiet=True))
-            if not downloaded_file: raise Exception("File not found or private.")
-
-        # --- MEGA.NZ ---
-        elif "mega.nz" in url:
-            await edit_status(status_msg, "📥 Downloading from Mega.nz...")
-            mega = Mega()
-            m_mega = mega.login() # Anonymous login
+            if downloaded_file is None: raise Exception("File not found or permission denied.")
             
-            # Handling: https://mega.nz/folder/ID#Key/file/FileID
-            if "/folder/" in url and "/file/" in url:
-                try:
-                    folder_url = url.split("/file/")[0]
-                    target_file_id = url.split("/file/")[1]
-                    
-                    files = m_mega.get_public_url_info(folder_url)
-                    target_node = None
-                    
-                    # Mega sometimes returns list, sometimes dict
-                    node_list = files.values() if isinstance(files, dict) else files
-                    
-                    for node in node_list:
-                        if isinstance(node, dict) and node.get('h') == target_file_id:
-                            target_node = node
-                            break
-                    
-                    if target_node:
-                        downloaded_file = await asyncio.get_event_loop().run_in_executor(
-                            None, lambda: m_mega.download(target_node)
-                        )
-                    else:
-                        raise Exception("Specific file not found in Mega folder.")
-                except Exception as e:
-                    raise Exception(f"Mega Folder Error: {e}")
-            
-            # Handling: Standard File Link or Folder Link
-            else:
-                try:
-                    downloaded_file = await asyncio.get_event_loop().run_in_executor(
-                        None, lambda: m_mega.download_url(url)
-                    )
-                except Exception as e:
-                    raise Exception(f"Mega Download Error: {e}")
-
-        # --- YOUTUBE-DL / DIRECT LINKS ---
-        else:
-            await edit_status(status_msg, "🔎 Analyzing Link...")
-            ydl_opts = {
-                'outtmpl': '%(title)s @skillneast.%(ext)s',
-                'quiet': True,
-                'no_warnings': True,
-                'logger': MyLogger()
-            }
-            with YoutubeDL(ydl_opts) as ydl:
-                info = await asyncio.get_event_loop().run_in_executor(None, lambda: ydl.extract_info(url, download=True))
-                downloaded_file = ydl.prepare_filename(info)
-
-        if not downloaded_file or not os.path.exists(downloaded_file):
-            raise Exception("Download Failed. File not found on disk.")
-
-        # --- RENAMING (If not already done by YTDLP) ---
-        if "@skillneast" not in downloaded_file:
             name, ext = os.path.splitext(downloaded_file)
-            new_name = f"{name} @skillneast{ext}"
-            os.rename(downloaded_file, new_name)
-            downloaded_file = new_name
+            final_filename = f"{name} @skillneast{ext}"
+            os.rename(downloaded_file, final_filename)
+            downloaded_file = final_filename
 
-        # --- UPLOADING ---
+        else: # YouTube-DL links
+            await edit_status(status_msg, "ðŸ”Ž Analyzing Link...")
+            ydl_opts_info = {'logger': MyLogger(), 'quiet': True, 'no_warnings': True}
+            with YoutubeDL(ydl_opts_info) as ydl:
+                info = await asyncio.get_event_loop().run_in_executor(None, lambda: ydl.extract_info(url, download=False))
+                safe_title = "".join(c for c in info.get('title', 'file') if c.isalnum() or c in ' -_').strip() or f"file_{int(time.time())}"
+                downloaded_file = f"{safe_title} @skillneast.{info.get('ext', 'mp4')}"
+            
+            await edit_status(status_msg, f"â¬‡ï¸ Downloading: `{safe_title}`")
+            ydl_opts_down = {'outtmpl': downloaded_file, 'logger': MyLogger(), 'progress_hooks': [lambda d: None]}
+            await asyncio.get_event_loop().run_in_executor(None, lambda: YoutubeDL(ydl_opts_down).download([url]))
+            if not os.path.exists(downloaded_file): raise Exception("Download Failed.")
+
         base_name = os.path.basename(downloaded_file)
-        await edit_status(status_msg, f"⬆️ Uploading: `{base_name}`")
-        caption = f"📂 **{base_name}**\n\n👤 **User:** {m.from_user.mention}\n🤖 **Bot:** @skillneast"
-        
-        progress_args = (status_msg, time.time(), f"⬆️ Uploading...")
+        await edit_status(status_msg, f"â¬†ï¸ Uploading: `{base_name}`")
+        caption = f"ðŸ“‚ **{base_name}**\n\nðŸ‘¤ **User:** {m.from_user.mention}\nðŸ¤– **Bot:** @skillneast"
+        progress_args = (status_msg, time.time(), f"â¬†ï¸ Uploading...")
         
         if downloaded_file.lower().endswith(video_extensions):
-            await m.reply_video(
-                video=downloaded_file, 
-                caption=caption, 
-                supports_streaming=True, 
-                progress=progress_bar, 
-                progress_args=progress_args
-            )
+            await m.reply_video(video=downloaded_file, caption=caption, supports_streaming=True, progress=progress_bar, progress_args=progress_args)
         else:
-            await m.reply_document(
-                document=downloaded_file, 
-                caption=caption, 
-                progress=progress_bar, 
-                progress_args=progress_args
-            )
+            await m.reply_document(document=downloaded_file, caption=caption, progress=progress_bar, progress_args=progress_args)
         
         await status_msg.delete()
-
+            
     except asyncio.CancelledError:
-        await status_msg.edit_text("❌ **Task Cancelled by User**")
-        raise
+        await status_msg.edit_text("âŒ **Task Cancelled by User**")
+        raise # Re-throw to be caught by the handler
     except Exception as e:
         error_text = str(e).replace('ERROR:', '').strip()
-        await status_msg.edit_text(f"❌ **Error:**\n`{error_text}`")
+        await status_msg.edit_text(f"âŒ **Error:**\n`{error_text}`")
+        raise e
+        
     finally:
-        # Cleanup
         if downloaded_file and os.path.exists(downloaded_file):
-            try: os.remove(downloaded_file)
-            except: pass
+            os.remove(downloaded_file)
 
 async def run_task_with_cancellation(user_id, msg_id, awaitable_task):
+    """Adds a task to the tracker and cleans up after completion/cancellation."""
     task = asyncio.create_task(awaitable_task)
-    if user_id not in ACTIVE_TASKS: ACTIVE_TASKS[user_id] = {}
+    if user_id not in ACTIVE_TASKS:
+        ACTIVE_TASKS[user_id] = {}
     ACTIVE_TASKS[user_id][msg_id] = task
     
     try:
-        await task
+        result = await task
+        return result
     except asyncio.CancelledError:
+        # The error is already handled in process_link, just re-raise for bulk handler
         raise
     finally:
         if user_id in ACTIVE_TASKS and msg_id in ACTIVE_TASKS[user_id]:
@@ -278,21 +240,21 @@ async def run_task_with_cancellation(user_id, msg_id, awaitable_task):
             if not ACTIVE_TASKS[user_id]:
                 del ACTIVE_TASKS[user_id]
 
+# Wrapper for bulk processing
 async def run_process_wrapper(client, m, url):
     async with semaphore:
-        status_msg = await m.reply_text(f"⏳ **Queued:** `{url}`")
+        status_msg = await m.reply_text(f"â³ **Queued:** `{url}`")
         try:
             await run_task_with_cancellation(
                 m.from_user.id,
                 status_msg.id,
                 process_link(client, m, url, status_msg)
             )
-            return True
-        except:
-            return False
+            return True # Success
+        except (Exception, asyncio.CancelledError):
+            return False # Failure or Cancelled
 
-# --- Main Message Handlers ---
-
+# --- HANDLERS ---
 @bot.on_message(filters.command(["bulk"]))
 async def bulk_download(bot: Client, m: Message):
     if m.from_user.id not in auth_users and m.from_user.id not in sudo_users: return
@@ -302,25 +264,34 @@ async def bulk_download(bot: Client, m: Message):
     else: return await m.reply_text("**Usage:** `/bulk <link1> <link2> ...`")
         
     links = re.findall(r'https?://[^\s]+', raw_text)
-    if not links: return await m.reply_text("❓ No valid links found.")
+    if not links: return await m.reply_text("â“ Diye gaye text me koi valid link nahi mila.")
         
     total_links = len(links)
     completed = 0
     failed = 0
     
-    bulk_msg = await m.reply_text(f"📦 **Bulk Queue Started!**\nLinks: {total_links}")
+    bulk_status_msg = await m.reply_text(f"ðŸ“¦ **Bulk Queue Started!**\n\nTotal Links: {total_links} | Concurrency: {CONCURRENCY_LIMIT}")
     
     tasks = [run_process_wrapper(bot, m, link) for link in links]
     
     for future in asyncio.as_completed(tasks):
-        res = await future
-        if res: completed += 1
+        result = await future
+        if result: completed += 1
         else: failed += 1
-        try:
-            await bulk_msg.edit_text(f"📦 **Bulk Progress:** {completed+failed}/{total_links}\n✅ {completed} | ❌ {failed}")
-        except: pass
             
-    await bulk_msg.edit_text(f"✅ **Bulk Finished!**\nTotal: {total_links} | Success: {completed} | Failed: {failed}")
+        try:
+            await bulk_status_msg.edit_text(
+                f"ðŸ“¦ **Bulk Progress...**\n\n"
+                f"**ðŸ“Š Status:** {completed + failed} / {total_links}\n"
+                f"**âœ… Completed:** {completed}\n"
+                f"**âŒ Failed/Cancelled:** {failed}"
+            )
+        except MessageNotModified: pass
+            
+    await bulk_status_msg.edit_text(
+        f"âœ… **Bulk Complete!**\n\n"
+        f"**Total:** {total_links} | **Successful:** {completed} | **Failed/Cancelled:** {failed}"
+    )
 
 @bot.on_message(filters.text & ~filters.command(["start", "help", "bulk", "cancel"]))
 async def single_download(bot: Client, m: Message):
@@ -328,19 +299,20 @@ async def single_download(bot: Client, m: Message):
     
     url = m.text.strip()
     if url.startswith(("http://", "https://")):
-        status_msg = await m.reply_text("🚀 **Initializing...**", quote=True)
+        status_msg = await m.reply_text("ðŸš€ Preparing to download...", quote=True)
         try:
             await run_task_with_cancellation(
                 m.from_user.id,
                 status_msg.id,
                 process_link(bot, m, url, status_msg)
             )
-        except:
-            pass # Errors handled inside process_link
+        except (Exception, asyncio.CancelledError):
+            # Errors are already logged and message edited within the process.
+            pass
 
-# --- EXECUTION ---
+# ------------------- MAIN EXECUTION -------------------
 if __name__ == "__main__":
-    print("Starting Web Server...")
+    print("Starting Flask Server for Keep-Alive...")
     keep_alive()
     print("Starting Bot...")
     bot.run()
